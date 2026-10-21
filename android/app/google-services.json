@@ -1,0 +1,39 @@
+{
+"project_info": {
+"project_number": "367286439619",
+"project_id": "hbb-wi-fi-manager",
+"storage_bucket": "hbb-wi-fi-manager.firebasestorage.app"
+},
+"client": [
+{
+"client_info": {
+"mobilesdk_app_id": "1:367286439619:android:38c6c942632d53cafedc76",
+"android_client_info": {
+"package_name": "com.hbbdigital.hbb_wifi_manager"
+}
+},
+"oauth_client": [
+{
+"client_id": "367286439619-sis2ii0qaqukc1bk7gpqvh14qrt0jofk.apps.googleusercontent.com",
+"client_type": 3
+}
+],
+"api_key": [
+{
+"current_key": "AIzaSyCmjcWS-OFVKgBR88Uxp1Uz12sQQvn5GLw"
+}
+],
+"services": {
+"appinvite_service": {
+"other_platform_oauth_client": [
+{
+"client_id": "367286439619-sis2ii0qaqukc1bk7gpqvh14qrt0jofk.apps.googleusercontent.com",
+"client_type": 3
+}
+]
+}
+}
+}
+],
+"configuration_version": "1"
+}
