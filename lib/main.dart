@@ -11,11 +11,15 @@ import 'package:google_sign_in/google_sign_in.dart';
 const orange = Color(0xFFFF6A00);
 const gold = Color(0xFFFFC857);
 const cream = Color(0xFFFFF8F0);
+
 const localKey = 'hbb_clients';
+const backupLocalKey = 'hbb_clients_backup';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
   bool ready = false;
+
   try {
     await Firebase.initializeApp()
         .timeout(const Duration(seconds: 12));
@@ -23,28 +27,30 @@ Future<void> main() async {
   } catch (e) {
     debugPrint('Firebase non initialise : $e');
   }
+
   runApp(HBBApp(firebaseReady: ready));
 }
 
 class HBBApp extends StatelessWidget {
   final bool firebaseReady;
+
   const HBBApp({super.key, required this.firebaseReady});
 
   @override
   Widget build(BuildContext context) => MaterialApp(
-    debugShowCheckedModeBanner: false,
-    title: 'HBB WiFi Manager',
-    theme: ThemeData(
-      useMaterial3: true,
-      scaffoldBackgroundColor: cream,
-      colorScheme: ColorScheme.fromSeed(seedColor: orange),
-      appBarTheme: const AppBarTheme(
-        backgroundColor: Colors.white,
-        foregroundColor: Colors.black87,
-      ),
-    ),
-    home: HomePage(firebaseReady: firebaseReady),
-  );
+        debugShowCheckedModeBanner: false,
+        title: 'HBB WiFi Manager',
+        theme: ThemeData(
+          useMaterial3: true,
+          scaffoldBackgroundColor: cream,
+          colorScheme: ColorScheme.fromSeed(seedColor: orange),
+          appBarTheme: const AppBarTheme(
+            backgroundColor: Colors.white,
+            foregroundColor: Colors.black87,
+          ),
+        ),
+        home: HomePage(firebaseReady: firebaseReady),
+      );
 }
 
 class WifiClient {
@@ -71,15 +77,15 @@ class WifiClient {
   }
 
   Map<String, dynamic> toJson() => {
-    'id': id,
-    'name': name,
-    'phone': phone,
-    'code': code,
-    'price': price,
-    'start': start.toIso8601String(),
-    'end': end.toIso8601String(),
-    'paymentDate': paymentDate.toIso8601String(),
-  };
+        'id': id,
+        'name': name,
+        'phone': phone,
+        'code': code,
+        'price': price,
+        'start': start.toIso8601String(),
+        'end': end.toIso8601String(),
+        'paymentDate': paymentDate.toIso8601String(),
+      };
 
   factory WifiClient.fromJson(Map<String, dynamic> j) {
     final now = DateTime.now();
@@ -98,8 +104,9 @@ class WifiClient {
       phone: '${j['phone'] ?? j['telephone'] ?? ''}',
       code: '${j['code'] ?? ''}',
       price: int.tryParse(
-        '${j['price'] ?? j['prix'] ?? 0}',
-      ) ?? 0,
+            '${j['price'] ?? j['prix'] ?? 0}',
+          ) ??
+          0,
       start: start,
       end: date(
         j['end'] ?? j['endDate'] ?? j['dateFin'],
@@ -186,35 +193,71 @@ class _HomePageState extends State<HomePage> {
     loadLocal();
   }
 
-  // CORRECTION : evite le chargement local infini.
+  bool validJsonList(String? value) {
+    if (value == null || value.isEmpty) return false;
+
+    try {
+      return jsonDecode(value) is List;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // Charge les données principales ou la copie de secours.
   Future<void> loadLocal() async {
     try {
       final p = await SharedPreferences.getInstance()
           .timeout(const Duration(seconds: 12));
 
-      final raw = p.getString(localKey);
+      await p.reload().timeout(const Duration(seconds: 12));
 
-      if (raw != null && raw.isNotEmpty) {
-        try {
-          final decoded = jsonDecode(raw);
+      final primary = p.getString(localKey);
+      final backup = p.getString(backupLocalKey);
 
-          if (decoded is List) {
-            final loaded = decoded.map((x) =>
+      String? raw = primary;
+
+      if (!validJsonList(raw) && validJsonList(backup)) {
+        raw = backup;
+        debugPrint('Récupération depuis la copie de secours.');
+      }
+
+      if (validJsonList(raw)) {
+        final decoded = jsonDecode(raw!) as List;
+        final loaded = <WifiClient>[];
+
+        for (final item in decoded) {
+          try {
+            loaded.add(
               WifiClient.fromJson(
-                Map<String, dynamic>.from(x as Map),
+                Map<String, dynamic>.from(item as Map),
               ),
-            ).toList();
-
-            clients
-              ..clear()
-              ..addAll(loaded);
+            );
+          } catch (e) {
+            debugPrint('Client illisible ignore : $e');
           }
-        } catch (e) {
-          debugPrint('Donnees locales illisibles : $e');
+        }
+
+        clients
+          ..clear()
+          ..addAll(loaded);
+
+        // Répare la sauvegarde principale à partir du secours.
+        if (raw == backup && backup != null) {
+          await p.setString(localKey, backup);
         }
       }
     } catch (e, st) {
       debugPrint('Erreur chargement local : $e\n$st');
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Lecture locale impossible. Vérifie le stockage du téléphone.',
+            ),
+          ),
+        );
+      }
     } finally {
       if (mounted) {
         setState(() => loading = false);
@@ -222,14 +265,55 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  // Enregistre deux copies locales et vérifie leur contenu.
   Future<void> save() async {
-    final p = await SharedPreferences.getInstance();
+    try {
+      final p = await SharedPreferences.getInstance()
+          .timeout(const Duration(seconds: 12));
 
-    await p.setString(
-      localKey,
-      jsonEncode(clients.map((c) => c.toJson()).toList()),
-    );
+      final encoded = jsonEncode(
+        clients.map((c) => c.toJson()).toList(),
+      );
 
+      // Écrit d'abord la copie de secours.
+      final backupSaved = await p
+          .setString(backupLocalKey, encoded)
+          .timeout(const Duration(seconds: 12));
+
+      if (!backupSaved ||
+          p.getString(backupLocalKey) != encoded) {
+        throw Exception('Copie de secours non confirmée.');
+      }
+
+      // Écrit ensuite la sauvegarde principale.
+      final saved = await p
+          .setString(localKey, encoded)
+          .timeout(const Duration(seconds: 12));
+
+      if (!saved || p.getString(localKey) != encoded) {
+        throw Exception('Sauvegarde principale non confirmée.');
+      }
+
+      debugPrint('Sauvegarde locale vérifiée.');
+    } catch (e, st) {
+      debugPrint('ERREUR SAUVEGARDE LOCALE : $e\n$st');
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            duration: Duration(seconds: 7),
+            content: Text(
+              'ERREUR : sauvegarde non confirmée. '
+              'Ne ferme pas l’application ; réessaie.',
+            ),
+          ),
+        );
+      }
+
+      rethrow;
+    }
+
+    // Le cloud ne remplace jamais la sauvegarde locale.
     if (user != null) {
       try {
         await FirebaseFirestore.instance
@@ -242,7 +326,6 @@ class _HomePageState extends State<HomePage> {
           'updatedAt': FieldValue.serverTimestamp(),
         }, SetOptions(merge: true));
 
-        // Donnees minimales pour la consultation par code client.
         final batch = FirebaseFirestore.instance.batch();
 
         for (final c in clients) {
@@ -295,8 +378,7 @@ class _HomePageState extends State<HomePage> {
         idToken: auth.idToken,
       );
 
-      await FirebaseAuth.instance
-          .signInWithCredential(credential);
+      await FirebaseAuth.instance.signInWithCredential(credential);
 
       await syncCloud();
 
@@ -310,15 +392,11 @@ class _HomePageState extends State<HomePage> {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Connexion impossible : $e'),
-          ),
+          SnackBar(content: Text('Connexion impossible : $e')),
         );
       }
     } finally {
-      if (mounted) {
-        setState(() => syncing = false);
-      }
+      if (mounted) setState(() => syncing = false);
     }
   }
 
@@ -339,22 +417,18 @@ class _HomePageState extends State<HomePage> {
       if (list is List) {
         final merged = <String, WifiClient>{};
 
-        for (final c in list) {
+        for (final item in list) {
           try {
-            final item = WifiClient.fromJson(
-              Map<String, dynamic>.from(c as Map),
+            final c = WifiClient.fromJson(
+              Map<String, dynamic>.from(item as Map),
             );
 
-            merged[
-              item.id.isNotEmpty ? item.id : item.code
-            ] = item;
+            merged[c.id.isNotEmpty ? c.id : c.code] = c;
           } catch (_) {}
         }
 
         for (final c in clients) {
-          merged[
-            c.id.isNotEmpty ? c.id : c.code
-          ] = c;
+          merged[c.id.isNotEmpty ? c.id : c.code] = c;
         }
 
         clients
@@ -380,6 +454,8 @@ class _HomePageState extends State<HomePage> {
   }
 
   void message(String text) {
+    if (!mounted) return;
+
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(text)),
     );
@@ -442,11 +518,12 @@ class _HomePageState extends State<HomePage> {
       ),
     );
 
-    if (ok != true) return;
+    if (ok != true || !mounted) return;
 
     final n = name.text.trim();
     final amount = int.tryParse(price.text.trim());
     final duration = int.tryParse(days.text.trim());
+    final phoneValue = phone.text.trim();
 
     if (n.isEmpty ||
         amount == null ||
@@ -459,28 +536,32 @@ class _HomePageState extends State<HomePage> {
 
     final now = DateTime.now();
 
-    final code = newCode(
-      clients.map((c) => c.code).toSet(),
+    final client = WifiClient(
+      id: now.microsecondsSinceEpoch.toString(),
+      name: n,
+      phone: phoneValue,
+      code: newCode(clients.map((c) => c.code).toSet()),
+      price: amount,
+      start: now,
+      end: now.add(Duration(days: duration)),
+      paymentDate: now,
     );
 
-    clients.add(
-      WifiClient(
-        id: DateTime.now().microsecondsSinceEpoch.toString(),
-        name: n,
-        phone: phone.text.trim(),
-        code: code,
-        price: amount,
-        start: now,
-        end: now.add(Duration(days: duration)),
-        paymentDate: now,
-      ),
-    );
+    clients.add(client);
 
-    await save();
+    try {
+      await save();
 
-    if (mounted) setState(() {});
+      if (mounted) {
+        setState(() {});
+        message('Client créé et sauvegarde vérifiée. Code : ${client.code}');
+      }
+    } catch (_) {
+      // Retire de la liste en mémoire si la sauvegarde locale échoue.
+      clients.removeWhere((c) => c.id == client.id);
 
-    message('Client créé. Code : $code');
+      if (mounted) setState(() {});
+    }
   }
 
   int revenue(DateTime from, DateTime to) => clients
@@ -489,33 +570,32 @@ class _HomePageState extends State<HomePage> {
           c.paymentDate.isBefore(to))
       .fold(0, (sum, c) => sum + c.price);
 
-  int get total =>
-      clients.fold(0, (s, c) => s + c.price);
+  int get total => clients.fold(0, (s, c) => s + c.price);
 
   Widget stat(String title, int value) => Card(
-    color: Colors.white,
-    child: Padding(
-      padding: const EdgeInsets.all(14),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            title,
-            style: const TextStyle(color: Colors.black54),
+        color: Colors.white,
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                style: const TextStyle(color: Colors.black54),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                money(value),
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: orange,
+                  fontSize: 18,
+                ),
+              ),
+            ],
           ),
-          const SizedBox(height: 8),
-          Text(
-            money(value),
-            style: const TextStyle(
-              fontWeight: FontWeight.bold,
-              color: orange,
-              fontSize: 18,
-            ),
-          ),
-        ],
-      ),
-    ),
-  );
+        ),
+      );
 
   Widget dashboard() {
     final now = DateTime.now();
@@ -526,10 +606,7 @@ class _HomePageState extends State<HomePage> {
       children: [
         const Text(
           'Tableau de bord',
-          style: TextStyle(
-            fontSize: 24,
-            fontWeight: FontWeight.bold,
-          ),
+          style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
         ),
         const SizedBox(height: 12),
         stat(
@@ -555,95 +632,87 @@ class _HomePageState extends State<HomePage> {
         ),
         stat('Total encaissé', total),
         stat('Clients enregistrés', clients.length),
-        stat(
-          'Abonnements actifs',
-          clients.where((c) => c.active).length,
-        ),
+        stat('Abonnements actifs', clients.where((c) => c.active).length),
       ],
     );
   }
 
   Widget clientList() => ListView(
-    padding: const EdgeInsets.all(12),
-    children: [
-      Row(
+        padding: const EdgeInsets.all(12),
         children: [
-          const Expanded(
-            child: Text(
-              'Mes clients',
-              style: TextStyle(
-                fontSize: 23,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-          ),
-          IconButton(
-            onPressed: addClient,
-            icon: const Icon(
-              Icons.person_add_alt_1,
-              color: orange,
-            ),
-          ),
-        ],
-      ),
-      for (final c in clients)
-        Card(
-          color: Colors.white,
-          child: ListTile(
-            title: Text(
-              c.name,
-              style: const TextStyle(
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            subtitle: Text(
-              'Code : ${c.code}\n'
-              'Début : ${c.start.toLocal()}\n'
-              'Fin : ${c.end.toLocal()}\n'
-              'Temps restant : ${remainingText(c.remaining)}\n'
-              'Paiement : ${money(c.price)}',
-            ),
-            isThreeLine: true,
-            trailing: IconButton(
-              icon: const Icon(
-                Icons.delete_outline,
-                color: Colors.red,
-              ),
-              onPressed: () async {
-                final yes = await showDialog<bool>(
-                  context: context,
-                  builder: (ctx) => AlertDialog(
-                    title: const Text('Supprimer ce client ?'),
-                    content: const Text(
-                      'Cette action supprimera le client localement.',
-                    ),
-                    actions: [
-                      TextButton(
-                        onPressed: () =>
-                            Navigator.pop(ctx, false),
-                        child: const Text('Annuler'),
-                      ),
-                      FilledButton(
-                        onPressed: () =>
-                            Navigator.pop(ctx, true),
-                        child: const Text('Supprimer'),
-                      ),
-                    ],
+          Row(
+            children: [
+              const Expanded(
+                child: Text(
+                  'Mes clients',
+                  style: TextStyle(
+                    fontSize: 23,
+                    fontWeight: FontWeight.bold,
                   ),
-                );
-
-                if (yes == true) {
-                  clients.remove(c);
-                  await save();
-
-                  if (mounted) setState(() {});
-                }
-              },
-            ),
+                ),
+              ),
+              IconButton(
+                onPressed: addClient,
+                icon: const Icon(Icons.person_add_alt_1, color: orange),
+              ),
+            ],
           ),
-        ),
-    ],
-  );
+          for (final c in clients)
+            Card(
+              color: Colors.white,
+              child: ListTile(
+                title: Text(
+                  c.name,
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+                subtitle: Text(
+                  'Code : ${c.code}\n'
+                  'Début : ${c.start.toLocal()}\n'
+                  'Fin : ${c.end.toLocal()}\n'
+                  'Temps restant : ${remainingText(c.remaining)}\n'
+                  'Paiement : ${money(c.price)}',
+                ),
+                isThreeLine: true,
+                trailing: IconButton(
+                  icon: const Icon(Icons.delete_outline, color: Colors.red),
+                  onPressed: () async {
+                    final yes = await showDialog<bool>(
+                      context: context,
+                      builder: (ctx) => AlertDialog(
+                        title: const Text('Supprimer ce client ?'),
+                        content: const Text(
+                          'Cette action supprimera le client localement.',
+                        ),
+                        actions: [
+                          TextButton(
+                            onPressed: () => Navigator.pop(ctx, false),
+                            child: const Text('Annuler'),
+                          ),
+                          FilledButton(
+                            onPressed: () => Navigator.pop(ctx, true),
+                            child: const Text('Supprimer'),
+                          ),
+                        ],
+                      ),
+                    );
+
+                    if (yes != true) return;
+
+                    clients.remove(c);
+
+                    try {
+                      await save();
+                      if (mounted) setState(() {});
+                    } catch (_) {
+                      clients.add(c);
+                      if (mounted) setState(() {});
+                    }
+                  },
+                ),
+              ),
+            ),
+        ],
+      );
 
   Widget clientSpace() {
     final code = TextEditingController();
@@ -655,10 +724,7 @@ class _HomePageState extends State<HomePage> {
         children: [
           const Text(
             'Espace client',
-            style: TextStyle(
-              fontSize: 24,
-              fontWeight: FontWeight.bold,
-            ),
+            style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
           ),
           const SizedBox(height: 8),
           const Text(
@@ -699,10 +765,9 @@ class _HomePageState extends State<HomePage> {
                       .get();
 
                   if (snap.exists) cloud = snap.data();
-                } catch (e) {
+                } catch (_) {
                   message(
-                    'Consultation cloud indisponible. '
-                    'Vérifie les règles Firestore.',
+                    'Consultation cloud indisponible. Vérifie les règles Firestore.',
                   );
                   return;
                 }
@@ -711,9 +776,7 @@ class _HomePageState extends State<HomePage> {
               if (!mounted) return;
 
               if (local == null && cloud == null) {
-                message(
-                  'Code inconnu ou accès cloud indisponible.',
-                );
+                message('Code inconnu ou accès cloud indisponible.');
                 return;
               }
 
@@ -723,8 +786,7 @@ class _HomePageState extends State<HomePage> {
               final end = local?.end ??
                   DateTime.parse(cloud!['end'].toString());
 
-              final name =
-                  local?.name ?? cloud!['name'].toString();
+              final name = local?.name ?? cloud!['name'].toString();
 
               showDialog<void>(
                 context: context,
@@ -760,9 +822,7 @@ class _HomePageState extends State<HomePage> {
   Widget build(BuildContext context) {
     if (loading) {
       return const Scaffold(
-        body: Center(
-          child: CircularProgressIndicator(),
-        ),
+        body: Center(child: CircularProgressIndicator()),
       );
     }
 
@@ -781,14 +841,9 @@ class _HomePageState extends State<HomePage> {
                   ? const SizedBox(
                       width: 20,
                       height: 20,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                      ),
+                      child: CircularProgressIndicator(strokeWidth: 2),
                     )
-                  : const Icon(
-                      Icons.login,
-                      color: orange,
-                    ),
+                  : const Icon(Icons.login, color: orange),
             )
           else
             PopupMenuButton<String>(
@@ -806,10 +861,7 @@ class _HomePageState extends State<HomePage> {
                   child: Text('Déconnexion Google'),
                 ),
               ],
-              icon: const Icon(
-                Icons.account_circle,
-                color: orange,
-              ),
+              icon: const Icon(Icons.account_circle, color: orange),
             ),
         ],
       ),
@@ -831,8 +883,7 @@ class _HomePageState extends State<HomePage> {
           : null,
       bottomNavigationBar: NavigationBar(
         selectedIndex: tab,
-        onDestinationSelected: (i) =>
-            setState(() => tab = i),
+        onDestinationSelected: (i) => setState(() => tab = i),
         destinations: const [
           NavigationDestination(
             icon: Icon(Icons.dashboard_outlined),
