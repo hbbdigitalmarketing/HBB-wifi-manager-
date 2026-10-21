@@ -1,0 +1,609 @@
+
+import 'dart:convert';
+import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+void main() {
+  runApp(const HBBApp());
+}
+
+class HBBApp extends StatelessWidget {
+  const HBBApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      title: 'HBB WiFi Manager',
+      theme: ThemeData(
+        useMaterial3: true,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFFFF6A00),
+          brightness: Brightness.light,
+        ),
+        scaffoldBackgroundColor: const Color(0xFFFFF8F0),
+        appBarTheme: const AppBarTheme(
+          backgroundColor: Colors.white,
+          foregroundColor: Color(0xFF252525),
+        ),
+      ),
+      home: const HomePage(),
+    );
+  }
+}
+
+class Client {
+  String name;
+  String phone;
+  DateTime start;
+  int durationHours;
+
+  Client({
+    required this.name,
+    required this.phone,
+    required this.start,
+    required this.durationHours,
+  });
+
+  DateTime get expiry =>
+      start.add(Duration(hours: durationHours));
+
+  Map<String, dynamic> toJson() => {
+        'name': name,
+        'phone': phone,
+        'start': start.toIso8601String(),
+        'durationHours': durationHours,
+      };
+
+  factory Client.fromJson(Map<String, dynamic> json) {
+    return Client(
+      name: json['name'] as String,
+      phone: json['phone'] as String? ?? '',
+      start: DateTime.parse(json['start'] as String),
+      durationHours: json['durationHours'] as int,
+    );
+  }
+}
+
+class HomePage extends StatefulWidget {
+  const HomePage({super.key});
+
+  @override
+  State<HomePage> createState() => _HomePageState();
+}
+
+class _HomePageState extends State<HomePage> {
+  final List<Client> clients = [];
+  final TextEditingController searchController =
+      TextEditingController();
+
+  bool loading = true;
+  String search = '';
+
+  @override
+  void initState() {
+    super.initState();
+    loadClients();
+  }
+
+  @override
+  void dispose() {
+    searchController.dispose();
+    super.dispose();
+  }
+
+  Future<void> loadClients() async {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getString('hbb_clients');
+
+    if (saved != null) {
+      try {
+        final list = jsonDecode(saved) as List;
+        clients.addAll(
+          list.map((item) => Client.fromJson(
+                Map<String, dynamic>.from(item as Map),
+              )),
+        );
+      } catch (_) {
+        // Ignore unreadable saved data.
+      }
+    }
+
+    if (!mounted) return;
+    setState(() => loading = false);
+  }
+
+  Future<void> saveClients() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      'hbb_clients',
+      jsonEncode(clients.map((c) => c.toJson()).toList()),
+    );
+  }
+
+  String formatDate(DateTime date) {
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${two(date.day)}/${two(date.month)}/${date.year} '
+        '${two(date.hour)}:${two(date.minute)}';
+  }
+
+  String remainingTime(Client client) {
+    final difference = client.expiry.difference(DateTime.now());
+
+    if (difference.inSeconds <= 0) return 'Expiré';
+
+    final days = difference.inDays;
+    final hours = difference.inHours % 24;
+    final minutes = difference.inMinutes % 60;
+
+    if (days > 0) return '$days j $hours h restantes';
+    if (difference.inHours > 0) {
+      return '${difference.inHours} h $minutes min restantes';
+    }
+    return '$minutes min restantes';
+  }
+
+  Future<void> openClientDialog({Client? client}) async {
+    final nameController =
+        TextEditingController(text: client?.name ?? '');
+    final phoneController =
+        TextEditingController(text: client?.phone ?? '');
+
+    String unit = 'Jours';
+    int duration = client == null
+        ? 7
+        : (client.durationHours % 24 == 0
+            ? client.durationHours ~/ 24
+            : client.durationHours);
+
+    if (client != null && client.durationHours % 24 != 0) {
+      unit = 'Heures';
+    }
+
+    final formKey = GlobalKey<FormState>();
+
+    final result = await showDialog<Map<String, dynamic>>(
+      context: context,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (context, refreshDialog) {
+            return AlertDialog(
+              title: Text(
+                client == null ? 'Nouveau client' : 'Modifier le client',
+              ),
+              content: SingleChildScrollView(
+                child: Form(
+                  key: formKey,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      TextFormField(
+                        controller: nameController,
+                        decoration: const InputDecoration(
+                          labelText: 'Nom du client *',
+                          prefixIcon: Icon(Icons.person_outline),
+                        ),
+                        validator: (value) =>
+                            value == null || value.trim().isEmpty
+                                ? 'Saisis le nom du client'
+                                : null,
+                      ),
+                      const SizedBox(height: 12),
+                      TextFormField(
+                        controller: phoneController,
+                        keyboardType: TextInputType.phone,
+                        decoration: const InputDecoration(
+                          labelText: 'Téléphone (facultatif)',
+                          prefixIcon: Icon(Icons.phone_outlined),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      DropdownButtonFormField<String>(
+                        value: unit,
+                        decoration: const InputDecoration(
+                          labelText: 'Unité de durée',
+                        ),
+                        items: const [
+                          DropdownMenuItem(
+                            value: 'Heures',
+                            child: Text('Heures'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'Jours',
+                            child: Text('Jours'),
+                          ),
+                        ],
+                        onChanged: (value) {
+                          if (value == null) return;
+                          refreshDialog(() {
+                            if (unit == value) return;
+                            if (value == 'Jours') {
+                              duration = (duration / 24).ceil().clamp(1, 3650);
+                            } else {
+                              duration = (duration * 24).clamp(1, 87600);
+                            }
+                            unit = value;
+                          });
+                        },
+                      ),
+                      const SizedBox(height: 12),
+                      TextFormField(
+                        key: ValueKey(unit),
+                        initialValue: duration.toString(),
+                        keyboardType: TextInputType.number,
+                        decoration: InputDecoration(
+                          labelText: 'Durée en $unit',
+                        ),
+                        validator: (value) {
+                          final n = int.tryParse(value ?? '');
+                          if (n == null || n < 1) {
+                            return 'Saisis une durée valide';
+                          }
+                          if (n > (unit == 'Jours' ? 3650 : 87600)) {
+                            return 'Durée trop élevée';
+                          }
+                          return null;
+                        },
+                        onChanged: (value) {
+                          duration = int.tryParse(value) ?? 1;
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogContext),
+                  child: const Text('Annuler'),
+                ),
+                FilledButton(
+                  onPressed: () {
+                    if (!formKey.currentState!.validate()) return;
+                    final durationField = duration;
+                    Navigator.pop(dialogContext, {
+                      'name': nameController.text.trim(),
+                      'phone': phoneController.text.trim(),
+                      'durationHours':
+                          unit == 'Jours' ? durationField * 24 : durationField,
+                    });
+                  },
+                  child: const Text('Enregistrer'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    nameController.dispose();
+    phoneController.dispose();
+
+    if (result == null || !mounted) return;
+
+    setState(() {
+      if (client == null) {
+        clients.add(
+          Client(
+            name: result['name'] as String,
+            phone: result['phone'] as String,
+            start: DateTime.now(),
+            durationHours: result['durationHours'] as int,
+          ),
+        );
+      } else {
+        client
+          ..name = result['name'] as String
+          ..phone = result['phone'] as String
+          ..durationHours = result['durationHours'] as int;
+      }
+    });
+
+    await saveClients();
+  }
+
+  Future<void> renewClient(Client client) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Renouveler l’abonnement ?'),
+        content: Text(
+          'Le nouvel abonnement de ${client.name} commencera maintenant.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Annuler'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Renouveler'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true || !mounted) return;
+
+    setState(() => client.start = DateTime.now());
+    await saveClients();
+  }
+
+  Future<void> deleteClient(Client client) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Supprimer ce client ?'),
+        content: Text(
+          'Le client ${client.name} sera supprimé de cette application.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Annuler'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Colors.red,
+            ),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Supprimer'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true || !mounted) return;
+
+    setState(() => clients.remove(client));
+    await saveClients();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final visibleClients = clients.where((client) {
+      final query = search.toLowerCase();
+      return client.name.toLowerCase().contains(query) ||
+          client.phone.toLowerCase().contains(query);
+    }).toList();
+
+    final activeCount = clients
+        .where((client) => client.expiry.isAfter(DateTime.now()))
+        .length;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text(
+          'HBB WiFi Manager',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+        actions: [
+          IconButton(
+            tooltip: 'Ajouter un client',
+            onPressed: () => openClientDialog(),
+            icon: const Icon(Icons.person_add_alt_1),
+          ),
+        ],
+      ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: () => openClientDialog(),
+        icon: const Icon(Icons.add),
+        label: const Text('Ajouter un client'),
+      ),
+      body: loading
+          ? const Center(child: CircularProgressIndicator())
+          : SafeArea(
+              child: Column(
+                children: [
+                  Container(
+                    width: double.infinity,
+                    margin: const EdgeInsets.all(16),
+                    padding: const EdgeInsets.all(20),
+                    decoration: BoxDecoration(
+                      gradient: const LinearGradient(
+                        colors: [
+                          Color(0xFFFF6A00),
+                          Color(0xFFFFA94D),
+                        ],
+                      ),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'GESTION DES ABONNEMENTS',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 14),
+                        Text(
+                          '${clients.length} client(s)',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 26,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        Text(
+                          '$activeCount abonnement(s) actif(s)',
+                          style: const TextStyle(color: Colors.white),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: TextField(
+                      controller: searchController,
+                      onChanged: (value) => setState(() => search = value),
+                      decoration: InputDecoration(
+                        hintText: 'Rechercher un client...',
+                        prefixIcon: const Icon(Icons.search),
+                        filled: true,
+                        fillColor: Colors.white,
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(14),
+                          borderSide: BorderSide.none,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Expanded(
+                    child: visibleClients.isEmpty
+                        ? Center(
+                            child: Padding(
+                              padding: const EdgeInsets.all(24),
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(
+                                    Icons.wifi,
+                                    size: 54,
+                                    color: Color(0xFFFF6A00),
+                                  ),
+                                  const SizedBox(height: 12),
+                                  Text(
+                                    clients.isEmpty
+                                        ? 'Aucun client pour le moment'
+                                        : 'Aucun résultat trouvé',
+                                    textAlign: TextAlign.center,
+                                    style: const TextStyle(
+                                      fontSize: 17,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 6),
+                                  const Text(
+                                    'Ajoute un client pour commencer.',
+                                    textAlign: TextAlign.center,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          )
+                        : ListView.builder(
+                            padding: const EdgeInsets.fromLTRB(16, 4, 16, 100),
+                            itemCount: visibleClients.length,
+                            itemBuilder: (context, index) {
+                              final client = visibleClients[index];
+                              final expired =
+                                  !client.expiry.isAfter(DateTime.now());
+
+                              return Card(
+                                color: Colors.white,
+                                margin: const EdgeInsets.only(bottom: 12),
+                                child: Padding(
+                                  padding: const EdgeInsets.all(14),
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Row(
+                                        children: [
+                                          CircleAvatar(
+                                            backgroundColor:
+                                                const Color(0xFFFFE0C2),
+                                            child: Text(
+                                              client.name.isEmpty
+                                                  ? '?'
+                                                  : client.name[0].toUpperCase(),
+                                              style: const TextStyle(
+                                                color: Color(0xFFFF6A00),
+                                                fontWeight: FontWeight.bold,
+                                              ),
+                                            ),
+                                          ),
+                                          const SizedBox(width: 12),
+                                          Expanded(
+                                            child: Column(
+                                              crossAxisAlignment:
+                                                  CrossAxisAlignment.start,
+                                              children: [
+                                                Text(
+                                                  client.name,
+                                                  style: const TextStyle(
+                                                    fontWeight: FontWeight.bold,
+                                                    fontSize: 16,
+                                                  ),
+                                                ),
+                                                if (client.phone.isNotEmpty)
+                                                  Text(client.phone),
+                                              ],
+                                            ),
+                                          ),
+                                          Icon(
+                                            expired
+                                                ? Icons.warning_amber_rounded
+                                                : Icons.check_circle,
+                                            color: expired
+                                                ? Colors.red
+                                                : Colors.green,
+                                          ),
+                                        ],
+                                      ),
+                                      const Divider(height: 24),
+                                      Text(
+                                        'Début : ${formatDate(client.start)}',
+                                      ),
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        'Expiration : ${formatDate(client.expiry)}',
+                                      ),
+                                      const SizedBox(height: 8),
+                                      Text(
+                                        remainingTime(client),
+                                        style: TextStyle(
+                                          color: expired
+                                              ? Colors.red
+                                              : const Color(0xFFE65F00),
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 8),
+                                      Wrap(
+                                        spacing: 4,
+                                        children: [
+                                          IconButton(
+                                            tooltip: 'Modifier',
+                                            onPressed: () =>
+                                                openClientDialog(client: client),
+                                            icon: const Icon(Icons.edit_outlined),
+                                          ),
+                                          TextButton.icon(
+                                            onPressed: () =>
+                                                renewClient(client),
+                                            icon: const Icon(
+                                              Icons.refresh,
+                                              size: 18,
+                                            ),
+                                            label: const Text('Renouveler'),
+                                          ),
+                                          IconButton(
+                                            tooltip: 'Supprimer',
+                                            onPressed: () =>
+                                                deleteClient(client),
+                                            icon: const Icon(
+                                              Icons.delete_outline,
+                                              color: Colors.red,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
+                  ),
+                ],
+              ),
+            ),
+    );
+  }
+}
