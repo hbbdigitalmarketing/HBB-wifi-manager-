@@ -27,6 +27,45 @@ jobs:
       - name: Generate Android project files
         run: flutter create --platforms=android --project-name hbb_wifi_manager --org com.hbbdigital .
 
+      - name: Configure Google Services plugin for Firebase
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          settings = Path("android/settings.gradle.kts")
+          app_gradle = Path("android/app/build.gradle.kts")
+
+          if not settings.exists() or not app_gradle.exists():
+              raise SystemExit("Fichiers Gradle attendus introuvables.")
+
+          settings_text = settings.read_text()
+          app_text = app_gradle.read_text()
+
+          plugin_line = '    id("com.google.gms.google-services") version "4.4.4" apply false'
+          if "com.google.gms.google-services" not in settings_text:
+              marker = "plugins {"
+              if marker not in settings_text:
+                  raise SystemExit("Bloc plugins introuvable dans settings.gradle.kts.")
+              settings_text = settings_text.replace(
+                  marker, marker + "\n" + plugin_line, 1
+              )
+              settings.write_text(settings_text)
+
+          app_plugin = '    id("com.google.gms.google-services")'
+          if "com.google.gms.google-services" not in app_text:
+              marker = "plugins {"
+              if marker not in app_text:
+                  raise SystemExit("Bloc plugins introuvable dans app/build.gradle.kts.")
+              app_text = app_text.replace(
+                  marker, marker + "\n" + app_plugin, 1
+              )
+              app_gradle.write_text(app_text)
+
+          if not Path("android/app/google-services.json").exists():
+              raise SystemExit("google-services.json est absent.")
+          PY
+
       - name: Install dependencies
         run: flutter pub get
 
