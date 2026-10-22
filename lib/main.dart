@@ -13,23 +13,24 @@ const orange = Color(0xFFFF6A00);
 const gold = Color(0xFFFFC857);
 const cream = Color(0xFFFFF8F0);
 
-const localKey = 'hbb_clients';
-const backupLocalKey = 'hbb_clients_backup';
+const clientsKey = 'hbb_clients';
+const backupKey = 'hbb_clients_backup';
+const paymentsKey = 'hbb_payments';
+const archivesKey = 'hbb_archives';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-
-  bool ready = false;
+  bool firebaseReady = false;
 
   try {
     await Firebase.initializeApp()
         .timeout(const Duration(seconds: 12));
-    ready = true;
+    firebaseReady = true;
   } catch (e) {
-    debugPrint('Firebase non initialise : $e');
+    debugPrint('Firebase indisponible : $e');
   }
 
-  runApp(HBBApp(firebaseReady: ready));
+  runApp(HBBApp(firebaseReady: firebaseReady));
 }
 
 class HBBApp extends StatelessWidget {
@@ -38,150 +39,188 @@ class HBBApp extends StatelessWidget {
   const HBBApp({super.key, required this.firebaseReady});
 
   @override
-  Widget build(BuildContext context) => MaterialApp(
-        debugShowCheckedModeBanner: false,
-        title: 'HBB WiFi Manager',
-        theme: ThemeData(
-          useMaterial3: true,
-          scaffoldBackgroundColor: cream,
-          colorScheme: ColorScheme.fromSeed(seedColor: orange),
-          appBarTheme: const AppBarTheme(
-            backgroundColor: Colors.white,
-            foregroundColor: Colors.black87,
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'HBB WI-FI MANAGER',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        useMaterial3: true,
+        scaffoldBackgroundColor: cream,
+        colorScheme: ColorScheme.fromSeed(seedColor: orange),
+        appBarTheme: const AppBarTheme(
+          backgroundColor: Colors.white,
+          foregroundColor: Colors.black87,
+        ),
+        cardTheme: CardThemeData(
+          color: Colors.white.withValues(alpha: 0.88),
+          elevation: 2,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(22),
           ),
         ),
-        home: HomePage(firebaseReady: firebaseReady),
-      );
-}
-
-class WifiClient {
-  String id, name, phone, code;
-  int price;
-  DateTime start, end, paymentDate;
-
-  WifiClient({
-    required this.id,
-    required this.name,
-    required this.phone,
-    required this.code,
-    required this.price,
-    required this.start,
-    required this.end,
-    required this.paymentDate,
-  });
-
-  bool get active => DateTime.now().isBefore(end);
-
-  Duration get remaining {
-    final d = end.difference(DateTime.now());
-    return d.isNegative ? Duration.zero : d;
-  }
-
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'name': name,
-        'phone': phone,
-        'code': code,
-        'price': price,
-        'start': start.toIso8601String(),
-        'end': end.toIso8601String(),
-        'paymentDate': paymentDate.toIso8601String(),
-      };
-
-  factory WifiClient.fromJson(Map<String, dynamic> j) {
-    final now = DateTime.now();
-
-    DateTime date(dynamic v, DateTime fallback) =>
-        DateTime.tryParse('$v') ?? fallback;
-
-    final start = date(
-      j['start'] ?? j['startDate'] ?? j['dateDebut'],
-      now,
-    );
-
-    return WifiClient(
-      id: '${j['id'] ?? j['code'] ?? ''}',
-      name: '${j['name'] ?? j['nom'] ?? 'Client'}',
-      phone: '${j['phone'] ?? j['telephone'] ?? ''}',
-      code: '${j['code'] ?? ''}',
-      price: int.tryParse(
-            '${j['price'] ?? j['prix'] ?? 0}',
-          ) ??
-          0,
-      start: start,
-      end: date(
-        j['end'] ?? j['endDate'] ?? j['dateFin'],
-        start,
       ),
-      paymentDate: date(
-        j['paymentDate'] ?? j['datePaiement'],
-        start,
-      ),
+      home: HomePage(firebaseReady: firebaseReady),
     );
   }
 }
 
-String money(int n) {
-  final s = n.toString();
-  final b = StringBuffer();
+String formatMoney(int amount) {
+  final s = amount.toString();
+  final out = StringBuffer();
 
-  for (int i = 0; i < s.length; i++) {
-    b.write(s[i]);
-
-    if ((s.length - i - 1) % 3 == 0 &&
-        i != s.length - 1) {
-      b.write(' ');
+  for (var i = 0; i < s.length; i++) {
+    out.write(s[i]);
+    if ((s.length - i - 1) % 3 == 0 && i != s.length - 1) {
+      out.write(' ');
     }
   }
 
-  return '${b.toString()} FCFA';
+  return '${out.toString()} FCFA';
 }
 
-String remainingText(Duration d) {
-  if (d == Duration.zero) return 'Expiré';
-
-  final days = d.inDays;
-  final hours = d.inHours % 24;
-  final minutes = d.inMinutes % 60;
-
-  if (days > 0) return '$days j $hours h';
-  if (hours > 0) return '$hours h $minutes min';
-
-  return '$minutes min';
+String formatDate(DateTime d) {
+  String two(int n) => n.toString().padLeft(2, '0');
+  return '${two(d.day)}/${two(d.month)}/${d.year} '
+      '${two(d.hour)}:${two(d.minute)}';
 }
 
-String newCode(Set<String> existing) {
+String remaining(Duration d) {
+  if (d.isNegative || d == Duration.zero) return 'Expiré';
+  if (d.inDays > 0) {
+    return '${d.inDays} j ${d.inHours % 24} h';
+  }
+  if (d.inHours > 0) {
+    return '${d.inHours} h ${d.inMinutes % 60} min';
+  }
+  return '${d.inMinutes} min';
+}
+
+String generateCode(Set<String> existing) {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  final r = Random.secure();
+  final random = Random.secure();
 
   while (true) {
     final code = List.generate(
       8,
-      (_) => chars[r.nextInt(chars.length)],
+      (_) => chars[random.nextInt(chars.length)],
     ).join();
 
     if (!existing.contains(code)) return code;
   }
 }
 
+class Client {
+  String id;
+  String name;
+  String phone;
+  String code;
+  int price;
+  DateTime createdAt;
+  DateTime start;
+  DateTime end;
+  bool archived;
+
+  Client({
+    required this.id,
+    required this.name,
+    required this.phone,
+    required this.code,
+    required this.price,
+    required this.createdAt,
+    required this.start,
+    required this.end,
+    this.archived = false,
+  });
+
+  bool get active => DateTime.now().isBefore(end);
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'name': name,
+    'phone': phone,
+    'code': code,
+    'price': price,
+    'createdAt': createdAt.toIso8601String(),
+    'start': start.toIso8601String(),
+    'end': end.toIso8601String(),
+    'archived': archived,
+  };
+
+  factory Client.fromJson(Map<String, dynamic> j) {
+    final now = DateTime.now();
+
+    DateTime readDate(dynamic v, DateTime fallback) =>
+        DateTime.tryParse('$v') ?? fallback;
+
+    final start = readDate(j['start'] ?? j['startDate'], now);
+
+    return Client(
+      id: '${j['id'] ?? j['code'] ?? now.microsecondsSinceEpoch}',
+      name: '${j['name'] ?? j['nom'] ?? 'Client'}',
+      phone: '${j['phone'] ?? j['telephone'] ?? ''}',
+      code: '${j['code'] ?? ''}',
+      price: int.tryParse('${j['price'] ?? j['prix'] ?? 0}') ?? 0,
+      createdAt: readDate(j['createdAt'], start),
+      start: start,
+      end: readDate(j['end'] ?? j['endDate'], start),
+      archived: j['archived'] == true,
+    );
+  }
+}
+
+class Payment {
+  final String id;
+  final String clientId;
+  final String clientName;
+  final int amount;
+  final DateTime date;
+  final String method;
+
+  Payment({
+    required this.id,
+    required this.clientId,
+    required this.clientName,
+    required this.amount,
+    required this.date,
+    required this.method,
+  });
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'clientId': clientId,
+    'clientName': clientName,
+    'amount': amount,
+    'date': date.toIso8601String(),
+    'method': method,
+  };
+
+  factory Payment.fromJson(Map<String, dynamic> j) => Payment(
+    id: '${j['id']}',
+    clientId: '${j['clientId'] ?? ''}',
+    clientName: '${j['clientName'] ?? ''}',
+    amount: int.tryParse('${j['amount'] ?? 0}') ?? 0,
+    date: DateTime.tryParse('${j['date']}') ?? DateTime.now(),
+    method: '${j['method'] ?? 'Autre'}',
+  );
+}
+
 class HomePage extends StatefulWidget {
   final bool firebaseReady;
 
-  const HomePage({
-    super.key,
-    required this.firebaseReady,
-  });
+  const HomePage({super.key, required this.firebaseReady});
 
   @override
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
-  final List<WifiClient> clients = [];
+class _HomePageState extends State<HomePage>
+    with WidgetsBindingObserver {
+  final List<Client> clients = [];
+  final List<Payment> payments = [];
 
   bool loading = true;
-  bool syncing = false;
-
+  bool busy = false;
+  String search = '';
   int tab = 0;
 
   User? get user => widget.firebaseReady
@@ -191,320 +230,157 @@ class _HomePageState extends State<HomePage> {
   @override
   void initState() {
     super.initState();
-    loadLocal();
+    WidgetsBinding.instance.addObserver(this);
+    loadData();
   }
 
-  bool validJsonList(String? value) {
-    if (value == null || value.isEmpty) return false;
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      loadData();
+    }
+  }
+
+  void notify(String text) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(text)),
+    );
+  }
+
+  List<dynamic>? decodeList(String? raw) {
+    if (raw == null) return null;
     try {
-      return jsonDecode(value) is List;
+      final decoded = jsonDecode(raw);
+      return decoded is List ? decoded : null;
     } catch (_) {
-      return false;
+      return null;
     }
   }
 
-  // Charge les données principales ou la copie de secours.
-  Future<void> loadLocal() async {
+  Future<void> loadData() async {
     try {
-      final p = await SharedPreferences.getInstance()
-          .timeout(const Duration(seconds: 12));
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.reload();
 
-      await p.reload().timeout(const Duration(seconds: 12));
+      final primary = prefs.getString(clientsKey);
+      final backup = prefs.getString(backupKey);
 
-      final primary = p.getString(localKey);
-      final backup = p.getString(backupLocalKey);
+      final primaryList = decodeList(primary);
+      final backupList = decodeList(backup);
 
-      String? raw = primary;
+      // Récupère le secours si la principale est absente,
+      // illisible ou vide alors que le secours contient des clients.
+      final useBackup = backupList != null &&
+          backupList.isNotEmpty &&
+          (primaryList == null || primaryList.isEmpty);
 
-      if (!validJsonList(raw) && validJsonList(backup)) {
-        raw = backup;
-        debugPrint('Récupération depuis la copie de secours.');
+      final source = useBackup ? backupList : primaryList;
+
+      clients.clear();
+      for (final item in source ?? []) {
+        try {
+          clients.add(Client.fromJson(
+            Map<String, dynamic>.from(item as Map),
+          ));
+        } catch (_) {}
       }
 
-      if (validJsonList(raw)) {
-        final decoded = jsonDecode(raw!) as List;
-        final loaded = <WifiClient>[];
-
-        for (final item in decoded) {
-          try {
-            loaded.add(
-              WifiClient.fromJson(
-                Map<String, dynamic>.from(item as Map),
-              ),
-            );
-          } catch (e) {
-            debugPrint('Client illisible ignore : $e');
-          }
-        }
-
-        clients
-          ..clear()
-          ..addAll(loaded);
-
-        // Répare la sauvegarde principale à partir du secours.
-        if (raw == backup && backup != null) {
-          await p.setString(localKey, backup);
-        }
+      payments.clear();
+      for (final item in decodeList(prefs.getString(paymentsKey)) ?? []) {
+        try {
+          payments.add(Payment.fromJson(
+            Map<String, dynamic>.from(item as Map),
+          ));
+        } catch (_) {}
       }
-    } catch (e, st) {
-      debugPrint('Erreur chargement local : $e\n$st');
 
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'Lecture locale impossible. Vérifie le stockage du téléphone.',
-            ),
-          ),
+      if (useBackup) {
+        final encoded = jsonEncode(
+          clients.map((c) => c.toJson()).toList(),
         );
+        await prefs.setString(clientsKey, encoded);
       }
+    } catch (e) {
+      debugPrint('Erreur de lecture : $e');
+      notify('Lecture impossible. Les données ne doivent pas être supprimées.');
     } finally {
-      if (mounted) {
-        setState(() => loading = false);
-      }
+      if (mounted) setState(() => loading = false);
     }
   }
 
-  // Enregistre deux copies locales et vérifie leur contenu.
-  Future<void> save() async {
-    try {
-      final p = await SharedPreferences.getInstance()
-          .timeout(const Duration(seconds: 12));
+  Future<void> saveData() async {
+    final prefs = await SharedPreferences.getInstance();
 
-      final encoded = jsonEncode(
-        clients.map((c) => c.toJson()).toList(),
-      );
+    final encodedClients = jsonEncode(
+      clients.map((c) => c.toJson()).toList(),
+    );
+    final encodedPayments = jsonEncode(
+      payments.map((p) => p.toJson()).toList(),
+    );
 
-      // Écrit d'abord la copie de secours.
-      final backupSaved = await p
-          .setString(backupLocalKey, encoded)
-          .timeout(const Duration(seconds: 12));
-
-      if (!backupSaved ||
-          p.getString(backupLocalKey) != encoded) {
-        throw Exception('Copie de secours non confirmée.');
-      }
-
-      // Écrit ensuite la sauvegarde principale.
-      final saved = await p
-          .setString(localKey, encoded)
-          .timeout(const Duration(seconds: 12));
-
-      if (!saved || p.getString(localKey) != encoded) {
-        throw Exception('Sauvegarde principale non confirmée.');
-      }
-
-      debugPrint('Sauvegarde locale vérifiée.');
-    } catch (e, st) {
-      debugPrint('ERREUR SAUVEGARDE LOCALE : $e\n$st');
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            duration: Duration(seconds: 7),
-            content: Text(
-              'ERREUR : sauvegarde non confirmée. '
-              'Ne ferme pas l’application ; réessaie.',
-            ),
-          ),
-        );
-      }
-
-      rethrow;
+    // Vérifie la copie de secours avant la copie principale.
+    final backupOk = await prefs.setString(backupKey, encodedClients);
+    if (!backupOk || prefs.getString(backupKey) != encodedClients) {
+      throw Exception('Copie de secours non confirmée');
     }
 
-    // Le cloud ne remplace jamais la sauvegarde locale.
-    if (user != null) {
-      try {
-        await FirebaseFirestore.instance
-            .collection('users')
-            .doc(user!.uid)
-            .collection('data')
-            .doc('clients')
-            .set({
-          'clients': clients.map((c) => c.toJson()).toList(),
-          'updatedAt': FieldValue.serverTimestamp(),
-        }, SetOptions(merge: true));
+    final mainOk = await prefs.setString(clientsKey, encodedClients);
+    if (!mainOk || prefs.getString(clientsKey) != encodedClients) {
+      throw Exception('Sauvegarde principale non confirmée');
+    }
 
-        final batch = FirebaseFirestore.instance.batch();
-
-        for (final c in clients) {
-          if (c.code.isEmpty) continue;
-
-          final ref = FirebaseFirestore.instance
-              .collection('clientLookup')
-              .doc(c.code);
-
-          batch.set(ref, {
-            'name': c.name,
-            'start': c.start.toIso8601String(),
-            'end': c.end.toIso8601String(),
-            'ownerUid': user!.uid,
-            'updatedAt': FieldValue.serverTimestamp(),
-          });
-        }
-
-        await batch.commit();
-      } catch (e) {
-        debugPrint('Synchronisation cloud impossible : $e');
-
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text(
-                'Sauvegarde locale faite, mais le cloud a échoué.',
-              ),
-            ),
-          );
-        }
-      }
+    final paymentsOk = await prefs.setString(paymentsKey, encodedPayments);
+    if (!paymentsOk ||
+        prefs.getString(paymentsKey) != encodedPayments) {
+      throw Exception('Sauvegarde des paiements non confirmée');
     }
   }
 
-  Future<void> googleLogin() async {
-    if (!widget.firebaseReady || syncing) return;
+  Future<void> loginGoogle() async {
+    if (!widget.firebaseReady || busy) {
+      notify('Firebase est indisponible pour le moment.');
+      return;
+    }
 
-    setState(() => syncing = true);
+    setState(() => busy = true);
 
     try {
       final account = await GoogleSignIn().signIn();
-
       if (account == null) return;
 
       final auth = await account.authentication;
-
       final credential = GoogleAuthProvider.credential(
         accessToken: auth.accessToken,
         idToken: auth.idToken,
       );
 
       await FirebaseAuth.instance.signInWithCredential(credential);
-
-      await syncCloud();
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Connexion Google réussie.'),
-          ),
-        );
-      }
+      notify('Connexion Google réussie. Vérifie la synchronisation avant de changer de téléphone.');
+      if (mounted) setState(() {});
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Connexion impossible : $e')),
-        );
-      }
+      notify('Connexion impossible : $e');
     } finally {
-      if (mounted) setState(() => syncing = false);
+      if (mounted) setState(() => busy = false);
     }
-  }
-
-  Future<void> syncCloud() async {
-    if (user == null) return;
-
-    final ref = FirebaseFirestore.instance
-        .collection('users')
-        .doc(user!.uid)
-        .collection('data')
-        .doc('clients');
-
-    final snap = await ref.get();
-
-    if (snap.exists) {
-      final list = snap.data()?['clients'];
-
-      if (list is List) {
-        final merged = <String, WifiClient>{};
-
-        for (final item in list) {
-          try {
-            final c = WifiClient.fromJson(
-              Map<String, dynamic>.from(item as Map),
-            );
-
-            merged[c.id.isNotEmpty ? c.id : c.code] = c;
-          } catch (_) {}
-        }
-
-        for (final c in clients) {
-          merged[c.id.isNotEmpty ? c.id : c.code] = c;
-        }
-
-        clients
-          ..clear()
-          ..addAll(merged.values);
-      }
-    }
-
-    await save();
-
-    if (mounted) setState(() {});
   }
 
   Future<void> logout() async {
-    try {
-      await GoogleSignIn().signOut();
-      await FirebaseAuth.instance.signOut();
+    if (user == null) return;
 
-      if (mounted) setState(() {});
-    } catch (e) {
-      message('Déconnexion impossible : $e');
-    }
-  }
-
-  void message(String text) {
-    if (!mounted) return;
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(text)),
-    );
-  }
-
-  Future<void> addClient() async {
-    final name = TextEditingController();
-    final phone = TextEditingController();
-    final price = TextEditingController();
-    final days = TextEditingController(text: '30');
-
-    final ok = await showDialog<bool>(
+    final keep = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Nouveau client'),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: name,
-                decoration: const InputDecoration(
-                  labelText: 'Nom du client',
-                ),
-              ),
-              TextField(
-                controller: phone,
-                keyboardType: TextInputType.phone,
-                decoration: const InputDecoration(
-                  labelText: 'Téléphone',
-                ),
-              ),
-              TextField(
-                controller: price,
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(
-                  labelText: 'Prix payé (FCFA)',
-                ),
-              ),
-              TextField(
-                controller: days,
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(
-                  labelText: 'Durée (jours)',
-                ),
-              ),
-            ],
-          ),
+        title: const Text('Déconnexion'),
+        content: const Text(
+          'Les données locales resteront sur ce téléphone. '
+          'Veux-tu continuer ?',
         ),
         actions: [
           TextButton(
@@ -513,96 +389,301 @@ class _HomePageState extends State<HomePage> {
           ),
           FilledButton(
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Créer'),
+            child: const Text('Continuer'),
           ),
         ],
       ),
     );
 
-    if (ok != true || !mounted) return;
+    if (keep != true) return;
+
+    try {
+      await GoogleSignIn().signOut();
+      await FirebaseAuth.instance.signOut();
+      if (mounted) setState(() {});
+    } catch (e) {
+      notify('Déconnexion impossible : $e');
+    }
+  }
+
+  Future<void> addClient() async {
+    final name = TextEditingController();
+    final phone = TextEditingController();
+    final price = TextEditingController(text: '0');
+    final duration = TextEditingController(text: '30');
+    String unit = 'Jours';
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, updateDialog) => AlertDialog(
+          title: const Text('Nouveau client'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: name,
+                  decoration: const InputDecoration(labelText: 'Nom'),
+                ),
+                TextField(
+                  controller: phone,
+                  keyboardType: TextInputType.phone,
+                  decoration: const InputDecoration(labelText: 'Téléphone'),
+                ),
+                TextField(
+                  controller: price,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                    labelText: 'Montant payé (FCFA)',
+                  ),
+                ),
+                TextField(
+                  controller: duration,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(labelText: 'Durée'),
+                ),
+                const SizedBox(height: 8),
+                DropdownButtonFormField<String>(
+                  value: unit,
+                  decoration: const InputDecoration(labelText: 'Unité'),
+                  items: const [
+                    DropdownMenuItem(value: 'Heures', child: Text('Heures')),
+                    DropdownMenuItem(value: 'Jours', child: Text('Jours')),
+                  ],
+                  onChanged: (v) {
+                    if (v != null) updateDialog(() => unit = v);
+                  },
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Annuler'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Créer'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
 
     final n = name.text.trim();
+    final p = phone.text.trim();
     final amount = int.tryParse(price.text.trim());
-    final duration = int.tryParse(days.text.trim());
-    final phoneValue = phone.text.trim();
+    final count = int.tryParse(duration.text.trim());
 
-    if (n.isEmpty ||
-        amount == null ||
-        amount < 0 ||
-        duration == null ||
-        duration <= 0) {
-      message('Vérifie le nom, le prix et la durée.');
+    if (n.isEmpty || amount == null || amount < 0 ||
+        count == null || count <= 0) {
+      notify('Vérifie le nom, le montant et la durée.');
       return;
     }
 
     final now = DateTime.now();
+    final end = unit == 'Heures'
+        ? now.add(Duration(hours: count))
+        : now.add(Duration(days: count));
 
-    final client = WifiClient(
+    final client = Client(
       id: now.microsecondsSinceEpoch.toString(),
       name: n,
-      phone: phoneValue,
-      code: newCode(clients.map((c) => c.code).toSet()),
-      price: amount,
+      phone: p,
+      code: generateCode(clients.map((c) => c.code).toSet()),
+      price: 0,
+      createdAt: now,
       start: now,
-      end: now.add(Duration(days: duration)),
-      paymentDate: now,
+      end: end,
     );
 
-    clients.add(client);
+    clients.insert(0, client);
 
     try {
-      await save();
-
-      if (mounted) {
-        setState(() {});
-        message('Client créé et sauvegarde vérifiée. Code : ${client.code}');
+      // Le prix d'un client n'est pas automatiquement un revenu.
+      if (amount > 0) {
+        payments.add(Payment(
+          id: 'PAY-${now.microsecondsSinceEpoch}',
+          clientId: client.id,
+          clientName: client.name,
+          amount: amount,
+          date: now,
+          method: 'À préciser',
+        ));
       }
+
+      await saveData();
+      if (mounted) setState(() {});
+      notify('Client créé. Code : ${client.code}');
     } catch (e) {
-      // Retire le client de la liste si la sauvegarde locale échoue.
-      clients.removeWhere((c) => c.id == client.id);
-
-      if (mounted) {
-        setState(() {});
-        message(
-          'Échec de sauvegarde locale. '
-          'Le client n’a pas été enregistré. Erreur : $e',
-        );
-      }
+      notify('Sauvegarde non confirmée. Vérifie les données avant de réessayer : $e');
     }
   }
 
-  int revenue(DateTime from, DateTime to) => clients
-      .where((c) =>
-          !c.paymentDate.isBefore(from) &&
-          c.paymentDate.isBefore(to))
-      .fold(0, (sum, c) => sum + c.price);
+  Future<void> recordPayment(Client client) async {
+    final amount = TextEditingController();
+    String method = 'Mobile Money';
 
-  int get total => clients.fold(0, (s, c) => s + c.price);
-
-  Widget stat(String title, int value) => Card(
-        color: Colors.white,
-        child: Padding(
-          padding: const EdgeInsets.all(14),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, updateDialog) => AlertDialog(
+          title: Text('Paiement — ${client.name}'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
             children: [
-              Text(
-                title,
-                style: const TextStyle(color: Colors.black54),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                money(value),
-                style: const TextStyle(
-                  fontWeight: FontWeight.bold,
-                  color: orange,
-                  fontSize: 18,
+              TextField(
+                controller: amount,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  labelText: 'Montant réellement reçu (FCFA)',
                 ),
+              ),
+              const SizedBox(height: 10),
+              DropdownButtonFormField<String>(
+                value: method,
+                items: const [
+                  DropdownMenuItem(
+                    value: 'Mobile Money',
+                    child: Text('Mobile Money'),
+                  ),
+                  DropdownMenuItem(value: 'Espèces', child: Text('Espèces')),
+                  DropdownMenuItem(
+                    value: 'Virement bancaire',
+                    child: Text('Virement bancaire'),
+                  ),
+                  DropdownMenuItem(value: 'Autre', child: Text('Autre')),
+                ],
+                onChanged: (v) {
+                  if (v != null) updateDialog(() => method = v);
+                },
               ),
             ],
           ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Annuler'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Enregistrer'),
+            ),
+          ],
         ),
-      );
+      ),
+    );
+
+    if (confirmed != true) return;
+    final value = int.tryParse(amount.text.trim());
+
+    if (value == null || value <= 0) {
+      notify('Le paiement doit être supérieur à zéro.');
+      return;
+    }
+
+    final now = DateTime.now();
+    payments.add(Payment(
+      id: 'PAY-${now.microsecondsSinceEpoch}',
+      clientId: client.id,
+      clientName: client.name,
+      amount: value,
+      date: now,
+      method: method,
+    ));
+
+    try {
+      await saveData();
+      if (mounted) setState(() {});
+      notify('Paiement enregistré : ${formatMoney(value)}');
+    } catch (e) {
+      notify('Erreur de sauvegarde : $e');
+    }
+  }
+
+  Future<void> archiveClient(Client client) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Archiver le client ?'),
+        content: const Text(
+          'Le client sera conservé dans les archives et pourra être restauré.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Annuler'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Archiver'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    client.archived = true;
+    try {
+      await saveData();
+      if (mounted) setState(() {});
+      notify('Client archivé.');
+    } catch (e) {
+      notify('Erreur de sauvegarde : $e');
+    }
+  }
+
+  Future<void> restoreClient(Client client) async {
+    client.archived = false;
+    try {
+      await saveData();
+      if (mounted) setState(() {});
+      notify('Client restauré.');
+    } catch (e) {
+      notify('Erreur de sauvegarde : $e');
+    }
+  }
+
+  int revenue(DateTime from, DateTime to) => payments
+      .where((p) =>
+          !p.date.isBefore(from) && p.date.isBefore(to))
+      .fold(0, (sum, p) => sum + p.amount);
+
+  int get totalRevenue =>
+      payments.fold(0, (sum, p) => sum + p.amount);
+
+  Widget glassCard(Widget child) {
+    return Card(
+      margin: const EdgeInsets.symmetric(vertical: 6),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: child,
+      ),
+    );
+  }
+
+  Widget metric(String label, int value) => glassCard(
+    Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label, style: const TextStyle(color: Colors.black54)),
+        const SizedBox(height: 8),
+        Text(
+          formatMoney(value),
+          style: const TextStyle(
+            color: orange,
+            fontWeight: FontWeight.bold,
+            fontSize: 21,
+          ),
+        ),
+      ],
+    ),
+  );
 
   Widget dashboard() {
     final now = DateTime.now();
@@ -612,218 +693,258 @@ class _HomePageState extends State<HomePage> {
       padding: const EdgeInsets.all(14),
       children: [
         const Text(
-          'Tableau de bord',
-          style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+          'Bonjour 👋',
+          style: TextStyle(fontSize: 25, fontWeight: FontWeight.bold),
         ),
+        const Text('Gérez vos clients simplement'),
         const SizedBox(height: 12),
-        stat(
+        metric(
           'Hier',
           revenue(
             today.subtract(const Duration(days: 1)),
             today,
           ),
         ),
-        stat(
+        metric(
           '7 derniers jours',
           revenue(
             today.subtract(const Duration(days: 6)),
             today.add(const Duration(days: 1)),
           ),
         ),
-        stat(
+        metric(
           '30 derniers jours',
           revenue(
             today.subtract(const Duration(days: 29)),
             today.add(const Duration(days: 1)),
           ),
         ),
-        stat('Total encaissé', total),
-        stat('Clients enregistrés', clients.length),
-        stat('Abonnements actifs', clients.where((c) => c.active).length),
+        metric('Total encaissé', totalRevenue),
+        Row(
+          children: [
+            Expanded(
+              child: glassCard(Column(
+                children: [
+                  const Text('Clients actifs'),
+                  Text(
+                    '${clients.where((c) => !c.archived && c.active).length}',
+                    style: const TextStyle(
+                      fontSize: 25,
+                      color: orange,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
+              )),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: glassCard(Column(
+                children: [
+                  const Text('Expirés'),
+                  Text(
+                    '${clients.where((c) => !c.archived && !c.active).length}',
+                    style: const TextStyle(
+                      fontSize: 25,
+                      color: orange,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
+              )),
+            ),
+          ],
+        ),
+        FilledButton.icon(
+          onPressed: addClient,
+          icon: const Icon(Icons.person_add_alt_1),
+          label: const Text('Ajouter un client'),
+        ),
       ],
     );
   }
 
-  Widget clientList() => ListView(
-        padding: const EdgeInsets.all(12),
-        children: [
-          Row(
-            children: [
-              const Expanded(
-                child: Text(
-                  'Mes clients',
-                  style: TextStyle(
-                    fontSize: 23,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
+  Widget clientList({bool archived = false, bool expired = false}) {
+    final list = clients.where((c) {
+      if (c.archived != archived) return false;
+      if (!archived && c.active == expired) return false;
+
+      final q = search.trim().toLowerCase();
+      return q.isEmpty ||
+          c.name.toLowerCase().contains(q) ||
+          c.phone.toLowerCase().contains(q) ||
+          c.code.toLowerCase().contains(q);
+    }).toList()
+      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(12),
+          child: TextField(
+            onChanged: (v) => setState(() => search = v),
+            decoration: InputDecoration(
+              hintText: 'Rechercher un client...',
+              prefixIcon: const Icon(Icons.search),
+              filled: true,
+              fillColor: Colors.white,
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(18),
+                borderSide: BorderSide.none,
               ),
-              IconButton(
-                onPressed: addClient,
-                icon: const Icon(Icons.person_add_alt_1, color: orange),
-              ),
-            ],
+            ),
           ),
-          for (final c in clients)
-            Card(
-              color: Colors.white,
-              child: ListTile(
-                title: Text(
-                  c.name,
-                  style: const TextStyle(fontWeight: FontWeight.bold),
-                ),
-                subtitle: Text(
-                  'Code : ${c.code}\n'
-                  'Début : ${c.start.toLocal()}\n'
-                  'Fin : ${c.end.toLocal()}\n'
-                  'Temps restant : ${remainingText(c.remaining)}\n'
-                  'Paiement : ${money(c.price)}',
-                ),
-                isThreeLine: true,
-                trailing: IconButton(
-                  icon: const Icon(Icons.delete_outline, color: Colors.red),
-                  onPressed: () async {
-                    final yes = await showDialog<bool>(
-                      context: context,
-                      builder: (ctx) => AlertDialog(
-                        title: const Text('Supprimer ce client ?'),
-                        content: const Text(
-                          'Cette action supprimera le client localement.',
-                        ),
-                        actions: [
-                          TextButton(
-                            onPressed: () => Navigator.pop(ctx, false),
-                            child: const Text('Annuler'),
+        ),
+        Expanded(
+          child: list.isEmpty
+              ? const Center(child: Text('Aucun client trouvé'))
+              : ListView.builder(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  itemCount: list.length,
+                  itemBuilder: (ctx, i) {
+                    final c = list[i];
+                    return glassCard(
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  c.name,
+                                  style: const TextStyle(
+                                    fontSize: 17,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ),
+                              Chip(
+                                label: Text(
+                                  c.archived
+                                      ? 'Archivé'
+                                      : c.active
+                                          ? 'Actif'
+                                          : 'Expiré',
+                                ),
+                                backgroundColor: c.active && !c.archived
+                                    ? const Color(0xFFE0F7E9)
+                                    : const Color(0xFFFFE4D6),
+                              ),
+                            ],
                           ),
-                          FilledButton(
-                            onPressed: () => Navigator.pop(ctx, true),
-                            child: const Text('Supprimer'),
+                          Text('Code : ${c.code}'),
+                          Text('Téléphone : ${c.phone}'),
+                          Text('Début : ${formatDate(c.start)}'),
+                          Text('Fin : ${formatDate(c.end)}'),
+                          Text('Temps restant : ${remaining(c.end.difference(DateTime.now()))}'),
+                          const SizedBox(height: 8),
+                          Wrap(
+                            spacing: 6,
+                            children: [
+                              if (archived)
+                                TextButton.icon(
+                                  onPressed: () => restoreClient(c),
+                                  icon: const Icon(Icons.restore),
+                                  label: const Text('Restaurer'),
+                                )
+                              else ...[
+                                TextButton.icon(
+                                  onPressed: () => recordPayment(c),
+                                  icon: const Icon(Icons.payments_outlined),
+                                  label: const Text('Paiement'),
+                                ),
+                                TextButton.icon(
+                                  onPressed: () => archiveClient(c),
+                                  icon: const Icon(Icons.archive_outlined),
+                                  label: const Text('Archiver'),
+                                ),
+                              ],
+                            ],
                           ),
                         ],
                       ),
                     );
-
-                    if (yes != true) return;
-
-                    clients.remove(c);
-
-                    try {
-                      await save();
-                      if (mounted) setState(() {});
-                    } catch (_) {
-                      clients.add(c);
-                      if (mounted) setState(() {});
-                    }
                   },
                 ),
-              ),
-            ),
-        ],
-      );
-
-  Widget clientSpace() {
-    final code = TextEditingController();
-
-    return Padding(
-      padding: const EdgeInsets.all(20),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            'Espace client',
-            style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-          ),
-          const SizedBox(height: 8),
-          const Text(
-            'Entre ton code personnel pour consulter ton abonnement.',
-          ),
-          const SizedBox(height: 14),
-          TextField(
-            controller: code,
-            textCapitalization: TextCapitalization.characters,
-            decoration: const InputDecoration(
-              labelText: 'Code client',
-              hintText: 'Ex. A8BC2XYZ',
-            ),
-          ),
-          const SizedBox(height: 12),
-          FilledButton(
-            onPressed: () async {
-              final entered = code.text.trim().toUpperCase();
-
-              if (entered.isEmpty) return;
-
-              WifiClient? local;
-
-              for (final c in clients) {
-                if (c.code.toUpperCase() == entered) {
-                  local = c;
-                  break;
-                }
-              }
-
-              Map<String, dynamic>? cloud;
-
-              if (local == null && widget.firebaseReady) {
-                try {
-                  final snap = await FirebaseFirestore.instance
-                      .collection('clientLookup')
-                      .doc(entered)
-                      .get();
-
-                  if (snap.exists) cloud = snap.data();
-                } catch (_) {
-                  message(
-                    'Consultation cloud indisponible. Vérifie les règles Firestore.',
-                  );
-                  return;
-                }
-              }
-
-              if (!mounted) return;
-
-              if (local == null && cloud == null) {
-                message('Code inconnu ou accès cloud indisponible.');
-                return;
-              }
-
-              final start = local?.start ??
-                  DateTime.parse(cloud!['start'].toString());
-
-              final end = local?.end ??
-                  DateTime.parse(cloud!['end'].toString());
-
-              final name = local?.name ?? cloud!['name'].toString();
-
-              showDialog<void>(
-                context: context,
-                builder: (ctx) => AlertDialog(
-                  title: Text('Bonjour $name'),
-                  content: Text(
-                    'Début : $start\n\n'
-                    'Fin : $end\n\n'
-                    'Temps restant : ${remainingText(
-                      end.difference(DateTime.now()).isNegative
-                          ? Duration.zero
-                          : end.difference(DateTime.now()),
-                    )}\n\n'
-                    'Statut : ${DateTime.now().isBefore(end) ? 'ACTIF' : 'EXPIRÉ'}',
-                  ),
-                  actions: [
-                    TextButton(
-                      onPressed: () => Navigator.pop(ctx),
-                      child: const Text('Fermer'),
-                    ),
-                  ],
-                ),
-              );
-            },
-            child: const Text('Consulter mon abonnement'),
-          ),
-        ],
-      ),
+        ),
+      ],
     );
   }
+
+  Widget paymentsView() {
+    final sorted = payments.toList()
+      ..sort((a, b) => b.date.compareTo(a.date));
+
+    return ListView(
+      padding: const EdgeInsets.all(12),
+      children: [
+        metric('Total encaissé', totalRevenue),
+        if (sorted.isEmpty)
+          const Padding(
+            padding: EdgeInsets.all(24),
+            child: Text('Aucun paiement enregistré.'),
+          ),
+        for (final p in sorted)
+          glassCard(
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  p.clientName,
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+                Text(formatMoney(p.amount)),
+                Text(formatDate(p.date)),
+                Text('Moyen : ${p.method}'),
+                Text('Référence : ${p.id}'),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget settingsView() => ListView(
+    padding: const EdgeInsets.all(12),
+    children: [
+      glassCard(const ListTile(
+        leading: Icon(Icons.wifi, color: orange),
+        title: Text('HBB WI-FI MANAGER'),
+        subtitle: Text('Gérez vos clients simplement'),
+      )),
+      glassCard(ListTile(
+        leading: const Icon(Icons.cloud_outlined, color: orange),
+        title: const Text('Compte Google'),
+        subtitle: Text(
+          user == null ? 'Mode local' : user!.email ?? 'Connecté',
+        ),
+        trailing: user == null
+            ? const Icon(Icons.login)
+            : const Icon(Icons.verified_user_outlined),
+        onTap: user == null ? loginGoogle : logout,
+      )),
+      glassCard(ListTile(
+        leading: const Icon(Icons.save_outlined, color: orange),
+        title: const Text('Vérifier la sauvegarde locale'),
+        onTap: () async {
+          try {
+            await saveData();
+            notify('Sauvegarde locale vérifiée.');
+          } catch (e) {
+            notify('Erreur : $e');
+          }
+        },
+      )),
+      glassCard(ListTile(
+        leading: const Icon(Icons.info_outline, color: orange),
+        title: const Text('Informations'),
+        subtitle: const Text(
+          'Version de base — les fonctions Cloud et la sécurité '
+          'doivent être configurées et testées séparément.',
+        ),
+      )),
+    ],
+  );
 
   @override
   Widget build(BuildContext context) {
@@ -833,69 +954,58 @@ class _HomePageState extends State<HomePage> {
       );
     }
 
+    final pages = [
+      dashboard(),
+      clientList(),
+      paymentsView(),
+      clientList(archived: true),
+      settingsView(),
+    ];
+
     return Scaffold(
       appBar: AppBar(
         title: const Text(
-          'HBB WiFi Manager',
+          'HBB WI-FI MANAGER',
           style: TextStyle(fontWeight: FontWeight.bold),
         ),
         actions: [
           if (user == null)
             IconButton(
               tooltip: 'Connexion Google',
-              onPressed: syncing ? null : googleLogin,
-              icon: syncing
-                  ? const SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.login, color: orange),
+              onPressed: busy ? null : loginGoogle,
+              icon: const Icon(Icons.login, color: orange),
             )
           else
-            PopupMenuButton<String>(
-              onSelected: (v) {
-                if (v == 'sync') syncCloud();
-                if (v == 'logout') logout();
-              },
-              itemBuilder: (_) => [
-                const PopupMenuItem(
-                  value: 'sync',
-                  child: Text('Synchroniser maintenant'),
-                ),
-                const PopupMenuItem(
-                  value: 'logout',
-                  child: Text('Déconnexion Google'),
-                ),
-              ],
+            IconButton(
+              tooltip: 'Déconnexion',
+              onPressed: logout,
               icon: const Icon(Icons.account_circle, color: orange),
             ),
         ],
       ),
-      body: IndexedStack(
-        index: tab,
-        children: [
-          dashboard(),
-          clientList(),
-          clientSpace(),
-        ],
-      ),
+      body: IndexedStack(index: tab, children: pages),
       floatingActionButton: tab == 1
-          ? FloatingActionButton(
+          ? FloatingActionButton.extended(
               backgroundColor: orange,
               foregroundColor: Colors.white,
               onPressed: addClient,
-              child: const Icon(Icons.add),
+              icon: const Icon(Icons.add),
+              label: const Text('Ajouter'),
             )
           : null,
       bottomNavigationBar: NavigationBar(
         selectedIndex: tab,
-        onDestinationSelected: (i) => setState(() => tab = i),
+        onDestinationSelected: (i) {
+          setState(() {
+            tab = i;
+            search = '';
+          });
+        },
         destinations: const [
           NavigationDestination(
             icon: Icon(Icons.dashboard_outlined),
             selectedIcon: Icon(Icons.dashboard),
-            label: 'Accueil',
+            label: 'Tableau de bord',
           ),
           NavigationDestination(
             icon: Icon(Icons.people_outline),
@@ -903,9 +1013,19 @@ class _HomePageState extends State<HomePage> {
             label: 'Clients',
           ),
           NavigationDestination(
-            icon: Icon(Icons.key_outlined),
-            selectedIcon: Icon(Icons.key),
-            label: 'Espace client',
+            icon: Icon(Icons.payments_outlined),
+            selectedIcon: Icon(Icons.payments),
+            label: 'Paiements',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.archive_outlined),
+            selectedIcon: Icon(Icons.archive),
+            label: 'Archives',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.settings_outlined),
+            selectedIcon: Icon(Icons.settings),
+            label: 'Paramètres',
           ),
         ],
       ),
