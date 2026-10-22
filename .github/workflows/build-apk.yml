@@ -71,6 +71,12 @@ jobs:
 
       - name: Build release APK
         run: flutter build apk --release
+      - name: Display APK certificate fingerprints
+        shell: bash
+        run: |
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -n 1)"
+          "$APKSIGNER" verify --print-certs build/app/outputs/flutter-apk/app-release.apk
+
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
