@@ -1,3 +1,4 @@
+
 import 'dart:convert';
 import 'dart:math';
 
@@ -556,11 +557,17 @@ class _HomePageState extends State<HomePage> {
         setState(() {});
         message('Client créé et sauvegarde vérifiée. Code : ${client.code}');
       }
-    } catch (_) {
-      // Retire de la liste en mémoire si la sauvegarde locale échoue.
+    } catch (e) {
+      // Retire le client de la liste si la sauvegarde locale échoue.
       clients.removeWhere((c) => c.id == client.id);
 
-      if (mounted) setState(() {});
+      if (mounted) {
+        setState(() {});
+        message(
+          'Échec de sauvegarde locale. '
+          'Le client n’a pas été enregistré. Erreur : $e',
+        );
+      }
     }
   }
 
