@@ -14,6 +14,14 @@
       },
       "oauth_client": [
         {
+          "client_id": "177231533306-q2soatrjd0hprtvmg6vmiuc1sul4eaor.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.hbbdigital.hbb_wifi_manager",
+            "certificate_hash": "5a3a691bd7afdf1867424741866cfc570263087a"
+          }
+        },
+        {
           "client_id": "177231533306-hjntcvcdre2nbevtqcrd7gqd59movdjb.apps.googleusercontent.com",
           "client_type": 3
         }
