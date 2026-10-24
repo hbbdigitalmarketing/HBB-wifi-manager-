@@ -1,4 +1,3 @@
-
 name: Build HBB WiFi Manager APK
 
 on:
@@ -66,17 +65,30 @@ jobs:
               raise SystemExit("google-services.json est absent.")
           PY
 
+      - name: Restore fixed signing key
+        id: keycache
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: debug-keystore-v1
+
+      - name: Create signing key if missing
+        if: steps.keycache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/.android
+          keytool -genkey -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+
       - name: Install dependencies
         run: flutter pub get
 
       - name: Build release APK
         run: flutter build apk --release
+
       - name: Display APK certificate fingerprints
         shell: bash
         run: |
           APKSIGNER="$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -n 1)"
           "$APKSIGNER" verify --print-certs build/app/outputs/flutter-apk/app-release.apk
-
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
