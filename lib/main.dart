@@ -1,22 +1,30 @@
-
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 
+import 'customer_space.dart';
+
 const orange = Color(0xFFFF6A00);
 const cream = Color(0xFFFFF8F0);
 const ink = Color(0xFF29231F);
+
+bool firebaseReady = false;
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   try {
     await Firebase.initializeApp();
-  } catch (_) {}
+    firebaseReady = true;
+  } catch (e) {
+    debugPrint('Firebase indisponible : $e');
+  }
   runApp(const HBBApp());
 }
 
@@ -61,6 +69,8 @@ class WiFiClient {
   int durationDays;
   DateTime createdAt;
   bool archived;
+  // Anciens forfaits (renouvellements). Absent des anciennes données => liste vide.
+  List<Map<String, dynamic>> history;
 
   WiFiClient({
     required this.id,
@@ -71,15 +81,16 @@ class WiFiClient {
     required this.durationDays,
     required this.createdAt,
     this.archived = false,
-  });
+    List<Map<String, dynamic>>? history,
+  }) : history = history ?? [];
 
-  DateTime get expiresAt =>
-      createdAt.add(Duration(days: durationDays));
+  DateTime get expiresAt => createdAt.add(Duration(days: durationDays));
 
-  int get remainingSeconds =>
-      expiresAt.difference(DateTime.now()).inSeconds;
+  int get remainingSeconds => expiresAt.difference(DateTime.now()).inSeconds;
 
   bool get active => remainingSeconds > 0;
+
+  String get planLabel => 'Forfait Wi-Fi $durationDays jours';
 
   Map<String, dynamic> toMap() => {
         'id': id,
@@ -90,20 +101,23 @@ class WiFiClient {
         'durationDays': durationDays,
         'createdAt': createdAt.toIso8601String(),
         'archived': archived,
+        'history': history,
       };
 
   factory WiFiClient.fromMap(Map<String, dynamic> m) {
+    final h = m['history'];
     return WiFiClient(
       id: '${m['id'] ?? ''}',
       name: '${m['name'] ?? ''}',
       phone: '${m['phone'] ?? ''}',
       code: '${m['code'] ?? ''}',
       price: (m['price'] as num?)?.toInt() ?? 0,
-      durationDays:
-          (m['durationDays'] as num?)?.toInt() ?? 30,
-      createdAt: DateTime.tryParse('${m['createdAt']}') ??
-          DateTime.now(),
+      durationDays: (m['durationDays'] as num?)?.toInt() ?? 30,
+      createdAt: DateTime.tryParse('${m['createdAt']}') ?? DateTime.now(),
       archived: m['archived'] == true,
+      history: h is List
+          ? h.map((e) => Map<String, dynamic>.from(e as Map)).toList()
+          : [],
     );
   }
 }
@@ -131,14 +145,12 @@ class WiFiPayment {
         'date': date.toIso8601String(),
       };
 
-  factory WiFiPayment.fromMap(Map<String, dynamic> m) =>
-      WiFiPayment(
+  factory WiFiPayment.fromMap(Map<String, dynamic> m) => WiFiPayment(
         id: '${m['id'] ?? ''}',
         clientId: '${m['clientId'] ?? ''}',
         clientName: '${m['clientName'] ?? ''}',
         amount: (m['amount'] as num?)?.toInt() ?? 0,
-        date: DateTime.tryParse('${m['date']}') ??
-            DateTime.now(),
+        date: DateTime.tryParse('${m['date']}') ?? DateTime.now(),
       );
 }
 
@@ -156,69 +168,140 @@ class _ManagerPageState extends State<ManagerPage> {
   int tab = 0;
   String period = '30 jours';
   bool busy = false;
+  bool showAccount = false;
+  String query = '';
   String message = 'Données enregistrées sur cet appareil';
 
-  User? get user => FirebaseAuth.instance.currentUser;
+  Timer? ticker;
+  StreamSubscription<User?>? authSub;
+
+  // Ignore le compte anonyme créé par l'Espace client.
+  User? get user {
+    if (!firebaseReady) return null;
+    final u = FirebaseAuth.instance.currentUser;
+    return (u == null || u.isAnonymous) ? null : u;
+  }
 
   @override
   void initState() {
     super.initState();
     loadLocal();
-    FirebaseAuth.instance.authStateChanges().listen((u) {
-      if (!mounted) return;
-      setState(() {});
+    if (firebaseReady) {
+      authSub = FirebaseAuth.instance.authStateChanges().listen((_) {
+        if (mounted) setState(() {});
+      });
+    }
+    ticker = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (mounted) setState(() {});
     });
   }
 
-  Future<void> loadLocal() async {
-    final p = await SharedPreferences.getInstance();
-    final c = p.getString('hbb_clients');
-    final pay = p.getString('hbb_payments');
+  @override
+  void dispose() {
+    ticker?.cancel();
+    authSub?.cancel();
+    super.dispose();
+  }
 
-    if (c != null) {
+  // ---------- STOCKAGE LOCAL ----------
+
+  Future<void> loadLocal() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      final c = p.getString('hbb_clients');
+      final pay = p.getString('hbb_payments');
+
+      // Copie de sécurité unique avant toute évolution du modèle.
+      if (c != null && p.getString('hbb_clients_backup_v1') == null) {
+        await p.setString('hbb_clients_backup_v1', c);
+        if (pay != null) await p.setString('hbb_payments_backup_v1', pay);
+      }
+
+      final loadedClients = c == null
+          ? <WiFiClient>[]
+          : (jsonDecode(c) as List)
+              .map((e) => WiFiClient.fromMap(Map<String, dynamic>.from(e)))
+              .toList();
+      final loadedPayments = pay == null
+          ? <WiFiPayment>[]
+          : (jsonDecode(pay) as List)
+              .map((e) => WiFiPayment.fromMap(Map<String, dynamic>.from(e)))
+              .toList();
+
       clients
         ..clear()
-        ..addAll((jsonDecode(c) as List).map(
-          (e) => WiFiClient.fromMap(
-            Map<String, dynamic>.from(e),
-          ),
-        ));
-    }
-    if (pay != null) {
+        ..addAll(loadedClients);
       payments
         ..clear()
-        ..addAll((jsonDecode(pay) as List).map(
-          (e) => WiFiPayment.fromMap(
-            Map<String, dynamic>.from(e),
-          ),
-        ));
+        ..addAll(loadedPayments);
+    } catch (e) {
+      message = 'Lecture locale impossible : aucune donnée n\'a été modifiée.';
     }
     if (mounted) setState(() {});
   }
 
-  Future<void> saveLocal() async {
-    final p = await SharedPreferences.getInstance();
-    await p.setString(
-      'hbb_clients',
-      jsonEncode(clients.map((e) => e.toMap()).toList()),
-    );
-    await p.setString(
-      'hbb_payments',
-      jsonEncode(payments.map((e) => e.toMap()).toList()),
-    );
+  Future<bool> saveLocal() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.setString(
+        'hbb_clients',
+        jsonEncode(clients.map((e) => e.toMap()).toList()),
+      );
+      await p.setString(
+        'hbb_payments',
+        jsonEncode(payments.map((e) => e.toMap()).toList()),
+      );
+      return true;
+    } catch (e) {
+      if (mounted) {
+        setState(() => message = 'Enregistrement local impossible.');
+      }
+      return false;
+    }
+  }
+
+  // ---------- OUTILS ----------
+
+  String friendlyError(Object e) {
+    if (e is CodeCollisionException) return 'code déjà utilisé';
+    if (e is FirebaseException) {
+      switch (e.code) {
+        case 'unavailable':
+        case 'network-request-failed':
+          return 'pas de connexion Internet';
+        case 'permission-denied':
+          return 'accès refusé par les règles Firestore';
+        case 'unauthenticated':
+          return 'session expirée, reconnecte-toi';
+        default:
+          return 'erreur ${e.code}';
+      }
+    }
+    if (e is PlatformException) {
+      final t = '${e.code} ${e.message}';
+      if (t.contains('ApiException: 10')) {
+        return 'empreinte SHA-1 non reconnue par Firebase (erreur 10)';
+      }
+      if (t.contains('ApiException: 7') || t.contains('network_error')) {
+        return 'pas de connexion Internet';
+      }
+      return 'erreur Google (${e.code})';
+    }
+    if (e is StateError) return e.message;
+    return 'erreur inattendue';
   }
 
   String get money =>
       '${payments.where((p) => inPeriod(p.date)).fold<int>(0, (s, p) => s + p.amount)} FCFA';
 
+  // Hier = jour calendaire précédent (heure locale) ;
+  // 7 / 30 jours = fenêtre glissante jusqu'à maintenant ; Total = tout.
   bool inPeriod(DateTime date) {
     final now = DateTime.now();
     switch (period) {
       case 'Hier':
-        final yesterday = DateTime(now.year, now.month, now.day - 1);
-        return date.year == yesterday.year &&
-            date.month == yesterday.month &&
-            date.day == yesterday.day;
+        final y = DateTime(now.year, now.month, now.day - 1);
+        return date.year == y.year && date.month == y.month && date.day == y.day;
       case '7 jours':
         return date.isAfter(now.subtract(const Duration(days: 7)));
       case '30 jours':
@@ -228,60 +311,253 @@ class _ManagerPageState extends State<ManagerPage> {
     }
   }
 
-  String newId() =>
-      '${DateTime.now().microsecondsSinceEpoch}';
+  String newId() => '${DateTime.now().microsecondsSinceEpoch}';
 
-  String newCode() {
-    final n = DateTime.now().microsecondsSinceEpoch % 1000000;
-    return 'HBB-${n.toString().padLeft(6, '0')}';
+  String newLocalCode() {
+    final used = clients.map((c) => c.code.toUpperCase()).toSet();
+    for (var i = 0; i < 50; i++) {
+      final code = PublicPlanService.generateCode();
+      if (!used.contains(code)) return code;
+    }
+    return PublicPlanService.generateCode();
   }
+
+  String remaining(WiFiClient c) =>
+      remainingLabel(c.expiresAt, DateTime.now());
+
+  // ---------- ACTIONS CLIENTS ----------
 
   Future<void> addClient() async {
     final name = TextEditingController();
     final phone = TextEditingController();
     final price = TextEditingController(text: '1000');
     final days = TextEditingController(text: '30');
+    var paid = true;
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          title: const Text('Nouveau client'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: name,
+                  decoration: const InputDecoration(labelText: 'Nom du client'),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: phone,
+                  keyboardType: TextInputType.phone,
+                  decoration: const InputDecoration(labelText: 'Téléphone'),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: price,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(labelText: 'Prix en FCFA'),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: days,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(labelText: 'Durée en jours'),
+                ),
+                CheckboxListTile(
+                  value: paid,
+                  onChanged: (v) => setD(() => paid = v ?? true),
+                  title: const Text('Paiement encaissé maintenant'),
+                  contentPadding: EdgeInsets.zero,
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Annuler'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Créer'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (ok != true || name.text.trim().isEmpty) return;
+
+    final amount = int.tryParse(price.text) ?? 0;
+    final parsedDays = int.tryParse(days.text) ?? 30;
+    final duration = parsedDays < 1 ? 1 : parsedDays;
+    final now = DateTime.now();
+    final id = newId();
+
+    // Connecté : le code est réservé dans le cloud (unicité garantie, même
+    // si deux téléphones créent un client en même temps).
+    var code = newLocalCode();
+    var published = false;
+    if (user != null) {
+      try {
+        code = await PublicPlanService.createUniqueCodeAndPublish(
+          label: 'Forfait Wi-Fi $duration jours',
+          createdAt: now,
+          expiresAt: now.add(Duration(days: duration)),
+          price: amount,
+        );
+        published = true;
+      } catch (e) {
+        message =
+            'Code créé hors ligne, fiche publique à synchroniser (${friendlyError(e)})';
+      }
+    }
+
+    final client = WiFiClient(
+      id: id,
+      name: name.text.trim(),
+      phone: phone.text.trim(),
+      code: code,
+      price: amount,
+      durationDays: duration,
+      createdAt: now,
+    );
+
+    setState(() {
+      clients.insert(0, client);
+      if (paid && amount > 0) {
+        payments.insert(
+          0,
+          WiFiPayment(
+            id: newId(),
+            clientId: id,
+            clientName: client.name,
+            amount: amount,
+            date: now,
+          ),
+        );
+      }
+    });
+
+    await saveLocal();
+    await syncCloud(showMessage: false);
+    if (!published) await publishPlans([client]);
+  }
+
+  Future<void> renewClient(WiFiClient c) async {
+    final price = TextEditingController(text: '${c.price}');
+    final days = TextEditingController(text: '${c.durationDays}');
+    var paid = true;
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          title: Text('Renouveler • ${c.name}'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  c.active
+                      ? 'Forfait encore actif (${remaining(c)}). Le nouveau forfait démarre MAINTENANT et remplace le temps restant.'
+                      : 'Forfait expiré. Le nouveau forfait démarre maintenant.',
+                  style: const TextStyle(fontSize: 13),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: price,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(labelText: 'Prix en FCFA'),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: days,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(labelText: 'Durée en jours'),
+                ),
+                CheckboxListTile(
+                  value: paid,
+                  onChanged: (v) => setD(() => paid = v ?? true),
+                  title: const Text('Paiement encaissé'),
+                  contentPadding: EdgeInsets.zero,
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Annuler'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Renouveler'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (ok != true) return;
+
+    final amount = int.tryParse(price.text) ?? c.price;
+    final parsedDays = int.tryParse(days.text) ?? c.durationDays;
+    final duration = parsedDays < 1 ? 1 : parsedDays;
+    final now = DateTime.now();
+
+    setState(() {
+      c.history.add({
+        'start': c.createdAt.toIso8601String(),
+        'durationDays': c.durationDays,
+        'price': c.price,
+      });
+      c.createdAt = now;
+      c.durationDays = duration;
+      c.price = amount;
+      if (paid && amount > 0) {
+        payments.insert(
+          0,
+          WiFiPayment(
+            id: newId(),
+            clientId: c.id,
+            clientName: c.name,
+            amount: amount,
+            date: now,
+          ),
+        );
+      }
+    });
+
+    await saveLocal();
+    await syncCloud(showMessage: false);
+    await publishPlans([c]);
+  }
+
+  Future<void> editClient(WiFiClient c) async {
+    final name = TextEditingController(text: c.name);
+    final phone = TextEditingController(text: c.phone);
 
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Nouveau client'),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: name,
-                decoration: const InputDecoration(
-                  labelText: 'Nom du client',
-                ),
-              ),
-              const SizedBox(height: 10),
-              TextField(
-                controller: phone,
-                keyboardType: TextInputType.phone,
-                decoration: const InputDecoration(
-                  labelText: 'Téléphone',
-                ),
-              ),
-              const SizedBox(height: 10),
-              TextField(
-                controller: price,
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(
-                  labelText: 'Prix en FCFA',
-                ),
-              ),
-              const SizedBox(height: 10),
-              TextField(
-                controller: days,
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(
-                  labelText: 'Durée en jours',
-                ),
-              ),
-            ],
-          ),
+        title: const Text('Modifier le client'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: name,
+              decoration: const InputDecoration(labelText: 'Nom du client'),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: phone,
+              keyboardType: TextInputType.phone,
+              decoration: const InputDecoration(labelText: 'Téléphone'),
+            ),
+          ],
         ),
         actions: [
           TextButton(
@@ -290,51 +566,23 @@ class _ManagerPageState extends State<ManagerPage> {
           ),
           FilledButton(
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Créer'),
+            child: const Text('Enregistrer'),
           ),
         ],
       ),
     );
 
     if (ok != true || name.text.trim().isEmpty) return;
-
-    final amount = int.tryParse(price.text) ?? 0;
-    final duration = int.tryParse(days.text) ?? 30;
-    final id = newId();
-
-    final client = WiFiClient(
-      id: id,
-      name: name.text.trim(),
-      phone: phone.text.trim(),
-      code: newCode(),
-      price: amount,
-      durationDays: duration < 1 ? 1 : duration,
-      createdAt: DateTime.now(),
-    );
-
     setState(() {
-      clients.insert(0, client);
-      if (amount > 0) {
-        payments.insert(
-          0,
-          WiFiPayment(
-            id: newId(),
-            clientId: id,
-            clientName: client.name,
-            amount: amount,
-            date: DateTime.now(),
-          ),
-        );
-      }
+      c.name = name.text.trim();
+      c.phone = phone.text.trim();
     });
-
     await saveLocal();
     await syncCloud(showMessage: false);
   }
 
   Future<void> addPayment(WiFiClient client) async {
-    final controller =
-        TextEditingController(text: '${client.price}');
+    final controller = TextEditingController(text: '${client.price}');
 
     final ok = await showDialog<bool>(
       context: context,
@@ -343,9 +591,7 @@ class _ManagerPageState extends State<ManagerPage> {
         content: TextField(
           controller: controller,
           keyboardType: TextInputType.number,
-          decoration: const InputDecoration(
-            labelText: 'Montant en FCFA',
-          ),
+          decoration: const InputDecoration(labelText: 'Montant en FCFA'),
         ),
         actions: [
           TextButton(
@@ -384,10 +630,88 @@ class _ManagerPageState extends State<ManagerPage> {
     setState(() => client.archived = !client.archived);
     await saveLocal();
     await syncCloud(showMessage: false);
+    await publishPlans([client]);
   }
+
+  void openClient(WiFiClient c) {
+    final pays = payments.where((p) => p.clientId == c.id).toList();
+    Widget info(String l, String v) => Padding(
+          padding: const EdgeInsets.only(bottom: 6),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SizedBox(
+                width: 110,
+                child: Text(l, style: const TextStyle(color: Colors.black54)),
+              ),
+              Expanded(
+                child: Text(v, style: const TextStyle(fontWeight: FontWeight.w600)),
+              ),
+            ],
+          ),
+        );
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              Text(c.name,
+                  style: const TextStyle(fontSize: 21, fontWeight: FontWeight.w900)),
+              const SizedBox(height: 12),
+              info('Téléphone', c.phone.isEmpty ? '—' : c.phone),
+              info('Code client', c.code),
+              info('Statut', c.active ? 'Actif' : 'Expiré'),
+              info('Début', formatDateTime(c.createdAt)),
+              info('Expiration', formatDateTime(c.expiresAt)),
+              info('Temps restant', remaining(c)),
+              info('Prix', '${c.price} FCFA'),
+              info('Durée', '${c.durationDays} jours'),
+              if (c.archived) info('Archivage', 'Client archivé'),
+              const SizedBox(height: 10),
+              const Text('Paiements',
+                  style: TextStyle(fontWeight: FontWeight.w800)),
+              if (pays.isEmpty) const Text('Aucun paiement enregistré'),
+              ...pays.map((p) => Text(
+                  '${formatDateTime(p.date)} • ${p.amount} FCFA')),
+              if (c.history.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                const Text('Anciens forfaits',
+                    style: TextStyle(fontWeight: FontWeight.w800)),
+                ...c.history.map((h) {
+                  final d = DateTime.tryParse('${h['start']}');
+                  return Text(
+                      '${d == null ? '—' : formatDateTime(d)} • ${h['durationDays']} j • ${h['price']} FCFA');
+                }),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void openPayments() {
+    Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => Scaffold(
+        appBar: AppBar(title: const Text('Paiements')),
+        body: paymentsPage(),
+      ),
+    ));
+  }
+
+  // ---------- GOOGLE & CLOUD ----------
 
   Future<void> signInGoogle() async {
     if (busy) return;
+    if (!firebaseReady) {
+      setState(() => message = 'Firebase indisponible sur cet appareil.');
+      return;
+    }
     setState(() {
       busy = true;
       message = 'Connexion Google…';
@@ -407,45 +731,109 @@ class _ManagerPageState extends State<ManagerPage> {
         message = 'Google connecté';
       }
     } catch (e) {
-      message = 'Connexion impossible : vérifie Firebase et Google';
+      message = 'Connexion impossible : ${friendlyError(e)}';
     }
 
     if (mounted) setState(() => busy = false);
-    if (user != null) await syncCloud();
+    if (user != null) await syncCloud(publishAll: true);
   }
 
   Future<void> signOutGoogle() async {
-    await FirebaseAuth.instance.signOut();
     try {
+      await FirebaseAuth.instance.signOut();
       await GoogleSignIn().signOut();
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('Déconnexion : $e');
+    }
     if (mounted) {
-      setState(() {
-        message = 'Déconnecté : données locales conservées';
-      });
+      setState(() => message = 'Déconnecté : données locales conservées');
     }
   }
 
-  Future<void> syncCloud({bool showMessage = true}) async {
+  // Empêche de mélanger les données de deux gestionnaires sur un même téléphone.
+  Future<bool> ensureOwner(User u) async {
+    final p = await SharedPreferences.getInstance();
+    final owner = p.getString('hbb_owner_uid');
+    if (owner == null || owner == u.uid) {
+      await p.setString('hbb_owner_uid', u.uid);
+      return true;
+    }
+    if (clients.isEmpty && payments.isEmpty) {
+      await p.setString('hbb_owner_uid', u.uid);
+      return true;
+    }
+    if (!mounted) return false;
+    final replace = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Données d\'un autre compte'),
+        content: const Text(
+          'Les données de cet appareil appartiennent à un autre compte. '
+          'Les remplacer par celles du compte connecté ? Une sauvegarde locale est conservée.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Non, me déconnecter'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Remplacer'),
+          ),
+        ],
+      ),
+    );
+    if (replace == true) {
+      await p.setString(
+        'hbb_backup_$owner',
+        jsonEncode({
+          'clients': clients.map((e) => e.toMap()).toList(),
+          'payments': payments.map((e) => e.toMap()).toList(),
+        }),
+      );
+      setState(() {
+        clients.clear();
+        payments.clear();
+      });
+      await p.setString('hbb_owner_uid', u.uid);
+      await saveLocal();
+      return true;
+    }
+    await signOutGoogle();
+    return false;
+  }
+
+  Future<void> syncCloud({
+    bool showMessage = true,
+    bool publishAll = false,
+  }) async {
     final current = user;
-    if (current == null || busy) return;
+    if (current == null) {
+      if (showMessage && mounted) {
+        setState(() => message = 'Connecte Google pour synchroniser');
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(message)));
+      }
+      return;
+    }
+    if (busy) return;
+    if (!await ensureOwner(current)) return;
 
     setState(() {
       busy = true;
       message = 'Synchronisation en cours…';
     });
 
+    var ok = false;
     try {
-      final root = FirebaseFirestore.instance
-          .collection('users')
-          .doc(current.uid);
-
+      final root =
+          FirebaseFirestore.instance.collection('users').doc(current.uid);
       final clientCol = root.collection('clients');
       final paymentCol = root.collection('payments');
 
+      // 1) Fusion : on AJOUTE ce qui manque en local, on ne supprime rien.
       final cloudClients = await clientCol.get();
       final localClientIds = clients.map((c) => c.id).toSet();
-
       for (final doc in cloudClients.docs) {
         final data = doc.data();
         final id = '${data['id'] ?? doc.id}';
@@ -456,7 +844,6 @@ class _ManagerPageState extends State<ManagerPage> {
 
       final cloudPayments = await paymentCol.get();
       final localPaymentIds = payments.map((p) => p.id).toSet();
-
       for (final doc in cloudPayments.docs) {
         final data = doc.data();
         final id = '${data['id'] ?? doc.id}';
@@ -465,46 +852,132 @@ class _ManagerPageState extends State<ManagerPage> {
         }
       }
 
-      final batch = FirebaseFirestore.instance.batch();
-
+      // 2) Envoi par lots de 400 (limite Firestore : 500 par lot).
+      final ops = <void Function(WriteBatch)>[];
       for (final c in clients) {
-        batch.set(clientCol.doc(c.id), c.toMap());
+        ops.add((b) => b.set(clientCol.doc(c.id), c.toMap()));
       }
       for (final p in payments) {
-        batch.set(paymentCol.doc(p.id), p.toMap());
+        ops.add((b) => b.set(paymentCol.doc(p.id), p.toMap()));
+      }
+      for (var i = 0; i < ops.length; i += 400) {
+        final batch = FirebaseFirestore.instance.batch();
+        for (final op in ops.skip(i).take(400)) {
+          op(batch);
+        }
+        await batch.commit();
       }
 
-      await batch.commit();
       await saveLocal();
-
-      message = 'Synchronisation Google réussie';
+      ok = true;
+      message =
+          'Synchronisation réussie : ${clients.length} client(s), ${payments.length} paiement(s)';
     } catch (e) {
-      message = 'Erreur cloud. Les données locales restent conservées.';
+      message =
+          'Échec de la synchronisation : ${friendlyError(e)}. Données locales conservées.';
+    }
+
+    if (mounted) setState(() => busy = false);
+
+    if (ok) {
+      final p = await SharedPreferences.getInstance();
+      final flagKey = 'hbb_plans_published_${current.uid}';
+      if (publishAll || p.getBool(flagKey) != true) {
+        final done = await publishPlans(List.of(clients));
+        if (done) await p.setBool(flagKey, true);
+      }
+    }
+
+    if (mounted && showMessage) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(message)));
+    }
+  }
+
+  // Publie la fiche publique (espace client). Ne contient ni nom ni téléphone.
+  Future<bool> publishPlans(List<WiFiClient> list) async {
+    if (user == null || list.isEmpty) return false;
+    final failed = <String>[];
+    var changedCode = false;
+    String? lastError;
+
+    for (final c in list) {
+      try {
+        await PublicPlanService.publish(
+          code: c.code,
+          label: c.planLabel,
+          createdAt: c.createdAt,
+          expiresAt: c.expiresAt,
+          price: c.price,
+          archived: c.archived,
+        );
+      } on CodeCollisionException {
+        // Code déjà pris par un autre gestionnaire : nouveau code unique.
+        try {
+          c.code = await PublicPlanService.createUniqueCodeAndPublish(
+            label: c.planLabel,
+            createdAt: c.createdAt,
+            expiresAt: c.expiresAt,
+            price: c.price,
+          );
+          changedCode = true;
+        } catch (e) {
+          failed.add(c.name);
+          lastError = friendlyError(e);
+        }
+      } catch (e) {
+        failed.add(c.name);
+        lastError = friendlyError(e);
+      }
+    }
+
+    if (changedCode) {
+      await saveLocal();
+      final cur = user;
+      if (cur != null) {
+        try {
+          final col = FirebaseFirestore.instance
+              .collection('users')
+              .doc(cur.uid)
+              .collection('clients');
+          for (final c in list) {
+            await col.doc(c.id).set(c.toMap());
+          }
+        } catch (e) {
+          lastError = friendlyError(e);
+        }
+      }
     }
 
     if (mounted) {
-      setState(() => busy = false);
-      if (showMessage) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(message)),
-        );
-      }
+      setState(() {
+        if (failed.isNotEmpty) {
+          message =
+              'Fiche client non publiée pour : ${failed.join(', ')} ($lastError)';
+        } else if (changedCode) {
+          message =
+              'Un code était déjà utilisé : un nouveau code a été attribué. Vérifie la fiche du client.';
+        }
+      });
     }
+    return failed.isEmpty;
   }
 
-  String remaining(WiFiClient c) {
-    if (!c.active) return 'Expiré';
-    final d = c.remainingSeconds ~/ 86400;
-    final h = (c.remainingSeconds % 86400) ~/ 3600;
-    final m = (c.remainingSeconds % 3600) ~/ 60;
-    if (d > 0) return '$d j $h h restantes';
-    if (h > 0) return '$h h $m min restantes';
-    return '$m min restantes';
-  }
+  // ---------- INTERFACE ----------
 
   @override
   Widget build(BuildContext context) {
     final visible = clients.where((c) => !c.archived).toList();
+
+    final Widget body = showAccount
+        ? accountPage()
+        : tab == 3
+            ? const CustomerSpaceScreen()
+            : tab == 2
+                ? archivesPage()
+                : tab == 1
+                    ? clientsPage(visible)
+                    : dashboard(visible);
 
     return Scaffold(
       appBar: AppBar(
@@ -523,8 +996,17 @@ class _ManagerPageState extends State<ManagerPage> {
         ),
         actions: [
           IconButton(
+            tooltip: 'Compte et sauvegarde',
+            onPressed: () => setState(() => showAccount = !showAccount),
+            icon: Icon(
+              user == null
+                  ? Icons.account_circle_outlined
+                  : Icons.account_circle_rounded,
+            ),
+          ),
+          IconButton(
             tooltip: 'Synchroniser',
-            onPressed: busy ? null : () => syncCloud(),
+            onPressed: busy ? null : () => syncCloud(publishAll: true),
             icon: const Icon(Icons.cloud_sync_rounded),
           ),
           const SizedBox(width: 8),
@@ -532,17 +1014,12 @@ class _ManagerPageState extends State<ManagerPage> {
       ),
       body: AnimatedSwitcher(
         duration: const Duration(milliseconds: 250),
-        child: tab == 3
-            ? customerSpace()
-            : tab == 2
-                ? archivesPage()
-                : tab == 1
-                    ? paymentsPage()
-                    : tab == 0
-                        ? dashboard(visible)
-                        : clientsPage(visible),
+        child: KeyedSubtree(
+          key: ValueKey('$tab-$showAccount'),
+          child: body,
+        ),
       ),
-      floatingActionButton: (tab == 0 || tab == 1)
+      floatingActionButton: ((tab == 0 || tab == 1) && !showAccount)
           ? FloatingActionButton.extended(
               onPressed: addClient,
               backgroundColor: orange,
@@ -553,7 +1030,10 @@ class _ManagerPageState extends State<ManagerPage> {
           : null,
       bottomNavigationBar: NavigationBar(
         selectedIndex: tab,
-        onDestinationSelected: (v) => setState(() => tab = v),
+        onDestinationSelected: (v) => setState(() {
+          tab = v;
+          showAccount = false;
+        }),
         destinations: const [
           NavigationDestination(
             icon: Icon(Icons.space_dashboard_rounded),
@@ -617,8 +1097,7 @@ class _ManagerPageState extends State<ManagerPage> {
                     .map((p) => ChoiceChip(
                           label: Text(p),
                           selected: period == p,
-                          onSelected: (_) =>
-                              setState(() => period = p),
+                          onSelected: (_) => setState(() => period = p),
                         ))
                     .toList(),
               ),
@@ -645,6 +1124,12 @@ class _ManagerPageState extends State<ManagerPage> {
             ),
           ],
         ),
+        const SizedBox(height: 14),
+        OutlinedButton.icon(
+          onPressed: openPayments,
+          icon: const Icon(Icons.payments_rounded),
+          label: const Text('Historique des paiements'),
+        ),
         const SizedBox(height: 22),
         sectionTitle('Clients récents'),
         if (visible.isEmpty)
@@ -657,19 +1142,39 @@ class _ManagerPageState extends State<ManagerPage> {
   }
 
   Widget clientsPage(List<WiFiClient> visible) {
+    final q = query.trim().toLowerCase();
+    final list = q.isEmpty
+        ? visible
+        : visible
+            .where((c) =>
+                c.name.toLowerCase().contains(q) ||
+                c.phone.toLowerCase().contains(q) ||
+                c.code.toLowerCase().contains(q))
+            .toList();
+
     return ListView(
       padding: const EdgeInsets.all(18),
       children: [
         sectionTitle('Tous les clients'),
+        TextField(
+          onChanged: (v) => setState(() => query = v),
+          decoration: const InputDecoration(
+            hintText: 'Rechercher (nom, téléphone, code)',
+            prefixIcon: Icon(Icons.search),
+          ),
+        ),
+        const SizedBox(height: 10),
         Text(
-          '${visible.length} client(s)',
+          '${list.length} client(s)',
           style: const TextStyle(color: Colors.black54),
         ),
         const SizedBox(height: 12),
-        if (visible.isEmpty)
-          emptyState('Ajoute ton premier client')
+        if (list.isEmpty)
+          emptyState(visible.isEmpty
+              ? 'Ajoute ton premier client'
+              : 'Aucun résultat')
         else
-          ...visible.map(clientCard),
+          ...list.map(clientCard),
         const SizedBox(height: 80),
       ],
     );
@@ -699,8 +1204,7 @@ class _ManagerPageState extends State<ManagerPage> {
         if (payments.isEmpty)
           emptyState('Aucun paiement enregistré')
         else
-          ...payments.where((p) => inPeriod(p.date)).map((p) =>
-              Container(
+          ...payments.where((p) => inPeriod(p.date)).map((p) => Container(
                 margin: const EdgeInsets.only(bottom: 10),
                 padding: const EdgeInsets.all(16),
                 decoration: BoxDecoration(
@@ -720,9 +1224,7 @@ class _ManagerPageState extends State<ManagerPage> {
                         children: [
                           Text(
                             p.clientName,
-                            style: const TextStyle(
-                              fontWeight: FontWeight.bold,
-                            ),
+                            style: const TextStyle(fontWeight: FontWeight.bold),
                           ),
                           Text(
                             '${p.date.day}/${p.date.month}/${p.date.year}',
@@ -732,7 +1234,7 @@ class _ManagerPageState extends State<ManagerPage> {
                       ),
                     ),
                     Text(
-                      '${p.amount} F',
+                      '${p.amount} FCFA',
                       style: const TextStyle(
                         color: orange,
                         fontWeight: FontWeight.w900,
@@ -745,59 +1247,11 @@ class _ManagerPageState extends State<ManagerPage> {
     );
   }
 
-  Widget customerSpace() {
-    final c = clients.where((c) => !c.archived).toList();
-
+  Widget accountPage() {
     return ListView(
       padding: const EdgeInsets.all(18),
       children: [
-        sectionTitle('Espace client'),
-        const Text(
-          'Recherche le code client pour consulter sa durée restante.',
-        ),
-        const SizedBox(height: 14),
-        Container(
-          padding: const EdgeInsets.all(18),
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(22),
-          ),
-          child: Column(
-            children: [
-              const Icon(Icons.wifi_rounded, size: 42, color: orange),
-              const SizedBox(height: 8),
-              const Text(
-                'HBB WiFi',
-                style: TextStyle(
-                  fontSize: 21,
-                  fontWeight: FontWeight.w900,
-                ),
-              ),
-              const Text('Les informations de connexion'),
-              const SizedBox(height: 16),
-              ...c.map((client) => ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    leading: const CircleAvatar(
-                      backgroundColor: Color(0xFFFFE6D5),
-                      child: Icon(Icons.person, color: orange),
-                    ),
-                    title: Text(client.name),
-                    subtitle: Text(
-                      'Code : ${client.code}\n${remaining(client)}',
-                    ),
-                    isThreeLine: true,
-                    trailing: Icon(
-                      client.active
-                          ? Icons.check_circle
-                          : Icons.timer_off,
-                      color: client.active ? Colors.green : Colors.red,
-                    ),
-                  )),
-            ],
-          ),
-        ),
-        const SizedBox(height: 20),
-        sectionTitle('Sauvegarde Google'),
+        sectionTitle('Compte et sauvegarde Google'),
         Container(
           padding: const EdgeInsets.all(18),
           decoration: BoxDecoration(
@@ -829,10 +1283,8 @@ class _ManagerPageState extends State<ManagerPage> {
                       ? null
                       : user == null
                           ? signInGoogle
-                          : () => syncCloud(),
-                  icon: Icon(
-                    user == null ? Icons.login : Icons.cloud_sync,
-                  ),
+                          : () => syncCloud(publishAll: true),
+                  icon: Icon(user == null ? Icons.login : Icons.cloud_sync),
                   label: Text(
                     busy
                         ? 'Patiente…'
@@ -850,111 +1302,127 @@ class _ManagerPageState extends State<ManagerPage> {
             ],
           ),
         ),
+        const SizedBox(height: 12),
+        TextButton(
+          onPressed: () => setState(() => showAccount = false),
+          child: const Text('Retour'),
+        ),
       ],
     );
   }
 
   Widget clientCard(WiFiClient c) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(21),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.035),
-            blurRadius: 15,
-            offset: const Offset(0, 5),
-          ),
-        ],
-      ),
-      child: Column(
-        children: [
-          Row(
-            children: [
-              CircleAvatar(
-                backgroundColor: const Color(0xFFFFE6D5),
-                child: Text(
-                  c.name.isNotEmpty ? c.name[0].toUpperCase() : '?',
-                  style: const TextStyle(
-                    color: orange,
-                    fontWeight: FontWeight.w900,
+    return GestureDetector(
+      onTap: () => openClient(c),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 12),
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(21),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.035),
+              blurRadius: 15,
+              offset: const Offset(0, 5),
+            ),
+          ],
+        ),
+        child: Column(
+          children: [
+            Row(
+              children: [
+                CircleAvatar(
+                  backgroundColor: const Color(0xFFFFE6D5),
+                  child: Text(
+                    c.name.isNotEmpty ? c.name[0].toUpperCase() : '?',
+                    style: const TextStyle(
+                      color: orange,
+                      fontWeight: FontWeight.w900,
+                    ),
                   ),
                 ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      c.name,
-                      style: const TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w800,
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        c.name,
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w800,
+                        ),
                       ),
+                      Text(
+                        c.phone.isEmpty ? 'Pas de téléphone' : c.phone,
+                        style: const TextStyle(color: Colors.black54),
+                      ),
+                    ],
+                  ),
+                ),
+                Icon(
+                  c.active ? Icons.wifi : Icons.wifi_off,
+                  color: c.active ? Colors.green : Colors.red,
+                ),
+              ],
+            ),
+            const Divider(height: 24),
+            Row(
+              children: [
+                const Icon(Icons.key_rounded, color: orange, size: 18),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    c.code,
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ),
+                Text(
+                  '${c.price} FCFA',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w900,
+                    color: orange,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                const Icon(Icons.timer_outlined, size: 18),
+                const SizedBox(width: 6),
+                Expanded(child: Text(remaining(c))),
+                PopupMenuButton<String>(
+                  onSelected: (v) {
+                    if (v == 'pay') addPayment(c);
+                    if (v == 'renew') renewClient(c);
+                    if (v == 'edit') editClient(c);
+                    if (v == 'archive') toggleArchive(c);
+                  },
+                  itemBuilder: (_) => [
+                    const PopupMenuItem(
+                      value: 'pay',
+                      child: Text('Ajouter un paiement'),
                     ),
-                    Text(
-                      c.phone.isEmpty ? 'Pas de téléphone' : c.phone,
-                      style: const TextStyle(color: Colors.black54),
+                    const PopupMenuItem(
+                      value: 'renew',
+                      child: Text('Renouveler le forfait'),
+                    ),
+                    const PopupMenuItem(
+                      value: 'edit',
+                      child: Text('Modifier'),
+                    ),
+                    PopupMenuItem(
+                      value: 'archive',
+                      child: Text(c.archived ? 'Restaurer' : 'Archiver'),
                     ),
                   ],
                 ),
-              ),
-              Icon(
-                c.active ? Icons.wifi : Icons.wifi_off,
-                color: c.active ? Colors.green : Colors.red,
-              ),
-            ],
-          ),
-          const Divider(height: 24),
-          Row(
-            children: [
-              const Icon(Icons.key_rounded, color: orange, size: 18),
-              const SizedBox(width: 6),
-              Expanded(
-                child: Text(
-                  c.code,
-                  style: const TextStyle(fontWeight: FontWeight.bold),
-                ),
-              ),
-              Text(
-                '${c.price} FCFA',
-                style: const TextStyle(
-                  fontWeight: FontWeight.w900,
-                  color: orange,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Row(
-            children: [
-              const Icon(Icons.timer_outlined, size: 18),
-              const SizedBox(width: 6),
-              Expanded(child: Text(remaining(c))),
-              PopupMenuButton<String>(
-                onSelected: (v) {
-                  if (v == 'pay') addPayment(c);
-                  if (v == 'archive') toggleArchive(c);
-                },
-                itemBuilder: (_) => [
-                  const PopupMenuItem(
-                    value: 'pay',
-                    child: Text('Ajouter un paiement'),
-                  ),
-                  PopupMenuItem(
-                    value: 'archive',
-                    child: Text(
-                      c.archived ? 'Restaurer' : 'Archiver',
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ],
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
