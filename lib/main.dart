@@ -28,7 +28,6 @@ Future<void> main() async {
   }
   runApp(const HBBApp());
 }
-
 class HBBApp extends StatelessWidget {
   const HBBApp({super.key});
 
@@ -54,7 +53,7 @@ class HBBApp extends StatelessWidget {
             borderRadius: BorderRadius.circular(16),
             borderSide: BorderSide.none,
           ),
-                ),
+        ),
       ),
       home: const WelcomePage(),
     );
