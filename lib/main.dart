@@ -54,7 +54,8 @@ class HBBApp extends StatelessWidget {
             borderRadius: BorderRadius.circular(16),
             borderSide: BorderSide.none,
           ),
-        ),   ),
+                ),
+      ),
       home: const WelcomePage(),
     );
   }
