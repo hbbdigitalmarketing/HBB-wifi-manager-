@@ -252,6 +252,7 @@ class _ManagerPageState extends State<ManagerPage> {
         'hbb_payments',
         jsonEncode(payments.map((e) => e.toMap()).toList()),
       );
+            scheduleExpiryAlerts();
       return true;
     } catch (e) {
       if (mounted) {
