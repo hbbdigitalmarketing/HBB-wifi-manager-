@@ -233,6 +233,7 @@ class _ManagerPageState extends State<ManagerPage> {
         ..clear()
         ..addAll(loadedClients);
       payments
+             scheduleExpiryAlerts();
         ..clear()
         ..addAll(loadedPayments);
     } catch (e) {
