@@ -77,6 +77,60 @@ jobs:
         run: |
           mkdir -p ~/.android
           keytool -genkey -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+      - name: Configure Android for notifications
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          gradle = Path("android/app/build.gradle.kts")
+          g = gradle.read_text()
+          if "isCoreLibraryDesugaringEnabled" not in g:
+              if "compileOptions {" not in g:
+                  raise SystemExit("compileOptions introuvable.")
+              g = g.replace(
+                  "compileOptions {",
+                  "compileOptions {\n        isCoreLibraryDesugaringEnabled = true",
+                  1,
+              )
+              g = re.sub(
+                  r"(buildTypes\s*\{\s*release\s*\{)",
+                  r"\1\n            isMinifyEnabled = false\n            isShrinkResources = false",
+                  g,
+                  count=1,
+              )
+              g += '\ndependencies {\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")\n}\n'
+              gradle.write_text(g)
+
+          manifest = Path("android/app/src/main/AndroidManifest.xml")
+          m = manifest.read_text()
+          if "ScheduledNotificationReceiver" not in m:
+              perms = (
+                  '<uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n'
+                  '    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>\n'
+                  '    <uses-permission android:name="android.permission.VIBRATE"/>\n'
+                  '    '
+              )
+              receivers = (
+                  '    <receiver android:exported="false" android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver" />\n'
+                  '    <receiver android:exported="false" android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver">\n'
+                  '      <intent-filter>\n'
+                  '        <action android:name="android.intent.action.BOOT_COMPLETED"/>\n'
+                  '        <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>\n'
+                  '        <action android:name="android.intent.action.QUICKBOOT_POWERON"/>\n'
+                  '        <action android:name="com.htc.intent.action.QUICKBOOT_POWERON"/>\n'
+                  '      </intent-filter>\n'
+                  '    </receiver>\n'
+                  '  '
+              )
+              m = m.replace("<application", perms + "<application", 1)
+              m = m.replace("</application>", receivers + "</application>", 1)
+              manifest.write_text(m)
+          PY
+
+      - name: Add notification packages
+        run: flutter pub add flutter_local_notifications:^19.0.0 timezone
 
       - name: Install dependencies
         run: flutter pub get
