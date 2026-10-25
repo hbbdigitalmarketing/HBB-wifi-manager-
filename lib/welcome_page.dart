@@ -3,7 +3,8 @@ import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/material.dart';
 
-import 'main.dart' show ManagerPage, orange, cream, ink;
+import 'package:firebase_auth/firebase_auth.dart';
+import 'main.dart' show ManagerPage, orange, cream, ink, firebaseReady;
 
 // ════════════════════════════════════════════════════════════════
 //  OUTILS PARTAGÉS : transition, fond liquide, verre liquide
