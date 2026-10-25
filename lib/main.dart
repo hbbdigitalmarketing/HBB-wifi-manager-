@@ -27,6 +27,7 @@ Future<void> main() async {
   } catch (e) {
     debugPrint('Firebase indisponible : $e');
   }
+    await ExpiryNotifications.init();
   runApp(const HBBApp());
 }
 class HBBApp extends StatelessWidget {
