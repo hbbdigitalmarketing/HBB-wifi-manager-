@@ -10,7 +10,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 
 import 'customer_space.dart';
-import 'customer_space.dart';
+
 import 'welcome_page.dart';
 const orange = Color(0xFFFF6A00);
 const cream = Color(0xFFFFF8F0);
@@ -54,9 +54,8 @@ class HBBApp extends StatelessWidget {
             borderRadius: BorderRadius.circular(16),
             borderSide: BorderSide.none,
           ),
-        ),
-  home: const WelcomePage(),    ),
-      home: const ManagerPage(),
+        ),   ),
+      home: const WelcomePage(),
     );
   }
 }
