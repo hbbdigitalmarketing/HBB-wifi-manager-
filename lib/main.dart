@@ -205,7 +205,14 @@ class _ManagerPageState extends State<ManagerPage> {
   }
 
   // ---------- STOCKAGE LOCAL ----------
-
+  void scheduleExpiryAlerts() {
+    unawaited(ExpiryNotifications.reschedule(
+      clients
+          .where((c) => !c.archived)
+          .map((c) => ExpiryItem(c.id, c.name, c.expiresAt, c.durationDays))
+          .toList(),
+    ));
+  }
   Future<void> loadLocal() async {
     try {
       final p = await SharedPreferences.getInstance();
