@@ -286,14 +286,21 @@ class _WelcomePageState extends State<WelcomePage>
     super.dispose();
   }
 
+    bool get _signedIn {
+    if (!firebaseReady) return false;
+    final u = FirebaseAuth.instance.currentUser;
+    return u != null && !u.isAnonymous;
+  }
+
   void _enter() {
     if (_leaving) return;
     _leaving = true;
-    // Va vers la présentation de l'application (5 écrans)
-    Navigator.of(context)
-        .pushReplacement(_fadeScaleRoute(const OnboardingPage()));
+    Navigator.of(context).pushReplacement(
+      _fadeScaleRoute(
+        _signedIn ? const ManagerPage() : const OnboardingPage(),
+      ),
+    );
   }
-
   Widget _slideFade(Animation<double> a, Widget child, {double dy = 0.4}) {
     return FadeTransition(
       opacity: a.drive(Tween(begin: 0.0, end: 1.0)
