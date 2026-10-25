@@ -55,7 +55,7 @@ class HBBApp extends StatelessWidget {
             borderSide: BorderSide.none,
           ),
         ),
-      ),
+  home: const WelcomePage(),    ),
       home: const ManagerPage(),
     );
   }
