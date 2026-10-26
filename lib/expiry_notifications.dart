@@ -52,8 +52,8 @@ class ExpiryNotifications {
       id,
       title,
       body,
-      tz.TZDateTime.from(date, tz.local),
-      details,
+      tz.TZDateTime.from(when, tz.local),
+      _details,
       androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
     );
   }
