@@ -52,12 +52,9 @@ class ExpiryNotifications {
       id,
       title,
       body,
-      tz.TZDateTime.from(when, tz.UTC),
-      _details,
+      tz.TZDateTime.from(date, tz.local),
+      details,
       androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
-      _details,
-      androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
-    );
     );
   }
 
