@@ -241,9 +241,9 @@ class _ManagerPageState extends State<ManagerPage> {
         ..clear()
         ..addAll(loadedClients);
       payments
-             scheduleExpiryAlerts();
         ..clear()
         ..addAll(loadedPayments);
+      scheduleExpiryAlerts();
     } catch (e) {
       message = 'Lecture locale impossible : aucune donnée n\'a été modifiée.';
     }
