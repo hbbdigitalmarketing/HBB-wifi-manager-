@@ -1,4 +1,3 @@
-
 name: hbb_wifi_manager
 description: Gestionnaire Wi-Fi HBB — HBB DIGITAL.
 publish_to: 'none'
@@ -16,19 +15,17 @@ dependencies:
   firebase_auth: ^5.7.0
   cloud_firestore: ^5.6.12
   google_sign_in: ^6.3.0
-  flutter_local_notifications: ^19.0.0
-  timezone: ^0.10.1
 
 dev_dependencies:
   flutter_test:
-  flutter_launcher_icons: ^0.14.3
-  sdk: flutter
+    sdk: flutter
   flutter_lints: ^4.0.0
+  flutter_launcher_icons: ^0.14.1
+
+flutter:
+  uses-material-design: true
 
 flutter_launcher_icons:
   android: true
   ios: false
   image_path: "assets/icon/icon.png"
-flutter:
-  uses-material-design: true
-  
